@@ -24,10 +24,12 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -47,9 +49,9 @@ import com.novelforge.app.infrastructure.llm.ChatMessage
 import com.novelforge.app.infrastructure.llm.ChatOptions
 import com.novelforge.app.infrastructure.llm.ChatRequest
 import com.novelforge.app.infrastructure.llm.ChatRole
+import com.novelforge.app.infrastructure.llm.LLMConnectionConfig
 import com.novelforge.app.infrastructure.llm.OpenAiCompatibleClient
 import com.novelforge.app.infrastructure.llm.ProviderCapabilities
-import com.novelforge.app.infrastructure.llm.LLMConnectionConfig
 import com.novelforge.app.infrastructure.llm.StreamEvent
 import com.novelforge.app.ui.theme.GlassSurface
 import kotlinx.coroutines.CancellationException
@@ -59,9 +61,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.serialization.Serializable
 
-@kotlinx.serialization.Serializable
 data class UiChatMessage(
     val role: ChatRole,
     val text: String,
@@ -232,14 +232,31 @@ fun ChatScreen(
     val error by viewModel.error.collectAsStateWithLifecycle()
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    // 反向布局（最新消息固定贴底）：内容增长时自动贴底跟随；
+    // 用户向上翻历史即暂停跟随，点悬浮键恢复
+    var autoFollow by remember { mutableStateOf(true) }
 
-    // 正文或思考有新内容时自动滚动到底部
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.firstVisibleItemIndex }
+            .collect { index ->
+                if (listState.isScrollInProgress && index > 0) autoFollow = false
+            }
+    }
+
+    val lastMessage = messages.lastOrNull()
     LaunchedEffect(
         messages.size,
-        messages.lastOrNull()?.text?.length,
-        messages.lastOrNull()?.reasoning?.length
+        lastMessage?.text?.length,
+        lastMessage?.reasoning?.length,
+        autoFollow
     ) {
-        if (messages.isNotEmpty()) listState.animateScrollToItem(messages.lastIndex)
+        if (messages.isNotEmpty() && autoFollow) {
+            listState.scrollToItem(0)
+        }
+    }
+
+    val awayFromBottom by remember {
+        derivedStateOf { listState.firstVisibleItemIndex > 0 }
     }
 
     Column(
@@ -267,98 +284,126 @@ fun ChatScreen(
             }
         }
 
-        // 消息区
-        LazyColumn(
-            state = listState,
+        // 消息区（reverseLayout：最新消息贴底，增长时天然跟随）
+        Box(
             modifier = Modifier
                 .weight(1f)
-                .fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .fillMaxWidth()
         ) {
             if (messages.isEmpty()) {
-                item {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 48.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(6.dp)
-                    ) {
-                        Text("和模型自由对话", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "构思剧情 · 设计人物 · 头脑风暴\n思考过程实时可见",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-            items(messages) { message ->
-                val isUser = message.role == ChatRole.USER
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(top = 48.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    if (isUser) {
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth(0.82f)
-                                .clip(RoundedCornerShape(20.dp, 6.dp, 20.dp, 20.dp))
-                                .background(UserBubbleGradient)
-                                .padding(horizontal = 14.dp, vertical = 10.dp)
+                    Text("和模型自由对话", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "构思剧情 · 设计人物 · 头脑风暴",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "思考过程实时可见",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    reverseLayout = true,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    items(messages.asReversed()) { message ->
+                        val isUser = message.role == ChatRole.USER
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
                         ) {
-                            Text(
-                                message.text,
-                                color = Color.White,
-                                style = MaterialTheme.typography.bodyMedium,
-                                lineHeight = 22.sp
-                            )
-                        }
-                    } else {
-                        Surface(
-                            modifier = Modifier.fillMaxWidth(0.88f),
-                            shape = RoundedCornerShape(6.dp, 20.dp, 20.dp, 20.dp),
-                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
-                        ) {
-                            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                                var reasoningOpen by remember(message.reasoning) {
-                                    mutableStateOf(message.streaming)
-                                }
-                                if (message.reasoning.isNotBlank()) {
-                                    Text(
-                                        if (message.streaming) "思考中…" else "已完成思考 · 点击展开/收起",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.Bold,
-                                        modifier = Modifier
-                                            .padding(bottom = 4.dp)
-                                            .clickable { reasoningOpen = !reasoningOpen }
-                                    )
-                                    if (reasoningOpen) {
-                                        Text(
-                                            message.reasoning,
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                                            lineHeight = 18.sp,
-                                            modifier = Modifier.padding(bottom = 8.dp)
-                                        )
-                                    }
-                                }
-                                if (message.text.isNotEmpty()) {
+                            if (isUser) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth(0.82f)
+                                        .clip(RoundedCornerShape(20.dp, 6.dp, 20.dp, 20.dp))
+                                        .background(UserBubbleGradient)
+                                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                                ) {
                                     Text(
                                         message.text,
+                                        color = Color.White,
                                         style = MaterialTheme.typography.bodyMedium,
-                                        lineHeight = 23.sp
+                                        lineHeight = 22.sp
                                     )
-                                } else if (message.streaming && message.reasoning.isBlank()) {
-                                    Text(
-                                        "…",
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
+                                }
+                            } else {
+                                Surface(
+                                    modifier = Modifier.fillMaxWidth(0.88f),
+                                    shape = RoundedCornerShape(6.dp, 20.dp, 20.dp, 20.dp),
+                                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .padding(horizontal = 16.dp, vertical = 12.dp)
+                                    ) {
+                                        var reasoningOpen by remember(message.reasoning) {
+                                            mutableStateOf(message.streaming)
+                                        }
+                                        if (message.reasoning.isNotBlank()) {
+                                            Text(
+                                                if (message.streaming) "思考中…" else "已完成思考 · 点击展开/收起",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier
+                                                    .padding(bottom = 4.dp)
+                                                    .clickable { reasoningOpen = !reasoningOpen }
+                                            )
+                                            if (reasoningOpen) {
+                                                Text(
+                                                    message.reasoning,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                                    lineHeight = 18.sp,
+                                                    modifier = Modifier.padding(bottom = 8.dp)
+                                                )
+                                            }
+                                        }
+                                        if (message.text.isNotEmpty()) {
+                                            Text(
+                                                message.text,
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                lineHeight = 23.sp
+                                            )
+                                        } else if (message.streaming && message.reasoning.isBlank()) {
+                                            Text(
+                                                "…",
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }
+                    }
+                }
+                if (awayFromBottom) {
+                    Surface(
+                        onClick = { autoFollow = true },
+                        shape = CircleShape,
+                        shadowElevation = 6.dp,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 8.dp)
+                    ) {
+                        Text(
+                            "↓ 回到最新",
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.labelMedium
+                        )
                     }
                 }
             }

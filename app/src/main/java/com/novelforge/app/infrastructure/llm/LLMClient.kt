@@ -29,7 +29,9 @@ data class ChatOptions(
      * It is never sent to the provider; it protects durable checkpoints when
      * a request is interrupted after earlier chapters were already saved.
      */
-    val checkpointPrefix: String = ""
+    val checkpointPrefix: String = "",
+    /** 请求开启思考并把 reasoning_content 作为独立事件流出（AI 助手用） */
+    val includeReasoning: Boolean = false
 )
 
 data class LLMConnectionConfig(
@@ -56,6 +58,8 @@ data class LlmResponse(
 
 sealed interface StreamEvent {
     data class Delta(val text: String) : StreamEvent
+    /** 思考过程增量（仅 ChatOptions.includeReasoning = true 时产生） */
+    data class Reasoning(val text: String) : StreamEvent
     data class Usage(val usage: LlmUsage) : StreamEvent
     data class Finished(val finishReason: String?) : StreamEvent
 }

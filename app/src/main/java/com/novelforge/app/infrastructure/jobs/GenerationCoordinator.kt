@@ -112,6 +112,8 @@ class GenerationCoordinator(
                         )
                     )
                     is StreamEvent.Finished -> finishReason = event.finishReason
+                    // 思考事件仅 AI 助手使用；大纲/正文请求不会开启，忽略即可
+                    is StreamEvent.Reasoning -> Unit
                 }
             }
             if (generationRepository.findById(jobId)?.status == GenerationJobStatus.CANCELLED) {

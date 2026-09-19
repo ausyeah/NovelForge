@@ -74,6 +74,7 @@ class OpenAiCompatibleClient(
 
     override fun streamChat(request: ChatRequest): Flow<StreamEvent> = channelFlow {
         validateBaseUrl(request.config.baseUrl)
+        val includeReasoning = request.options.includeReasoning
         val call = httpClient.newCall(buildRequest(request.copy(options = request.options.copy(stream = true))))
         request.options.timeoutMs?.let { timeoutMs ->
             call.timeout().timeout(timeoutMs, TimeUnit.MILLISECONDS)
@@ -98,7 +99,7 @@ class OpenAiCompatibleClient(
                             line.isEmpty() -> {
                                 if (dataLines.isNotEmpty()) {
                                     emittedSseData = true
-                                    streamFinished = emitSseData(dataLines) || streamFinished
+                                    streamFinished = emitSseData(dataLines, includeReasoning) || streamFinished
                                     sawFinish = streamFinished
                                     dataLines.clear()
                                     if (streamFinished) break
@@ -116,7 +117,7 @@ class OpenAiCompatibleClient(
                                     (dataLines.size == 1 && parseObjectOrNull(data) != null)
                                 ) {
                                     emittedSseData = true
-                                    streamFinished = emitSseData(dataLines) || streamFinished
+                                    streamFinished = emitSseData(dataLines, includeReasoning) || streamFinished
                                     sawFinish = streamFinished
                                     dataLines.clear()
                                     if (streamFinished) break
@@ -127,7 +128,7 @@ class OpenAiCompatibleClient(
                     }
                     if (dataLines.isNotEmpty()) {
                         emittedSseData = true
-                        sawFinish = emitSseData(dataLines) || sawFinish
+                        sawFinish = emitSseData(dataLines, includeReasoning) || sawFinish
                     }
                     // A few OpenAI-compatible gateways ignore stream=true and
                     // return one normal JSON response. Treat it as one delta
@@ -136,7 +137,7 @@ class OpenAiCompatibleClient(
                         val bodyText = rawBody.toString().trim()
                         if (bodyText.isNotEmpty()) {
                             val root = parseResponseObject(bodyText)
-                            sawFinish = emitResponseObject(root)
+                            sawFinish = emitResponseObject(root, includeReasoning)
                         }
                     }
                     // 流式输出结束却从没收到 finish_reason：多半是服务端限流/异常
@@ -158,17 +159,19 @@ class OpenAiCompatibleClient(
     }
 
     private suspend fun kotlinx.coroutines.channels.ProducerScope<StreamEvent>.emitSseData(
-        dataLines: List<String>
+        dataLines: List<String>,
+        includeReasoning: Boolean
     ): Boolean {
         if (dataLines.isEmpty()) return false
         val data = dataLines.joinToString("\n")
         if (data == "[DONE]") return true
         val root = parseResponseObject(data)
-        return emitResponseObject(root)
+        return emitResponseObject(root, includeReasoning)
     }
 
     private suspend fun kotlinx.coroutines.channels.ProducerScope<StreamEvent>.emitResponseObject(
-        root: JsonObject
+        root: JsonObject,
+        includeReasoning: Boolean
     ): Boolean {
         // 部分网关限流/出错时不返回 HTTP 错误码，而是 HTTP 200 + 响应体内嵌 error 对象，
         // 必须显式识别，否则会被当成“空响应”静默吞掉
@@ -177,6 +180,21 @@ class OpenAiCompatibleClient(
             throw ProviderProtocolException("服务端返回错误：$message")
         }
         val choice = root["choices"]?.jsonArray?.firstOrNull()?.jsonObject
+        // 思考内容独立流出（AI 助手场景展示用），不混入正文；
+        // 大纲/正文流程 includeReasoning=false，保持原有过滤行为
+        if (includeReasoning) {
+            val reasoningDelta = choice?.let { c ->
+                val delta = c["delta"] as? JsonObject
+                val message = c["message"] as? JsonObject
+                sequenceOf(
+                    delta?.get("reasoning_content"),
+                    delta?.get("reasoningContent"),
+                    message?.get("reasoning_content"),
+                    message?.get("reasoningContent")
+                ).mapNotNull { it?.let(::extractText) }.firstOrNull { it.isNotEmpty() }
+            }
+            if (!reasoningDelta.isNullOrEmpty()) send(StreamEvent.Reasoning(reasoningDelta))
+        }
         // Reasoning chunks are intentionally excluded from streaming output.
         // Some providers send a long reasoning_content before the actual JSON
         // content; mixing the two makes the final outline impossible to parse.
@@ -299,7 +317,7 @@ class OpenAiCompatibleClient(
                 request.options.outputTokenBudget
             )
             put("stream", request.options.stream)
-            if (request.config.disableThinking) {
+            if (request.config.disableThinking && !request.options.includeReasoning) {
                 // 国内 OpenAI 兼容网关常用的两种关闭思考写法（Qwen 系 / 智谱系），
                 // 不识别这些字段的网关通常会直接忽略，不影响请求
                 put("enable_thinking", false)

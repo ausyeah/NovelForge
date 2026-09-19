@@ -11,6 +11,8 @@ interface GenerationRepository {
     suspend fun findActiveJob(projectId: String, purpose: String, targetId: String?): GenerationJob?
     suspend fun findLatestJob(projectId: String, purpose: String, targetId: String?): GenerationJob?
     suspend fun countJobs(projectId: String, purpose: String, targetId: String): Int
+    suspend fun findJobsWithStatuses(statuses: Collection<String>): List<GenerationJob>
     suspend fun createJob(job: GenerationJob): GenerationJob
     suspend fun updateJob(job: GenerationJob)
+    suspend fun deleteJobsForTargets(projectId: String, purpose: String, targetIds: Collection<String>)
 }

@@ -224,6 +224,12 @@ class GenerationUseCaseTest {
         ): Flow<GenerationJob?> = emptyFlow()
 
         override suspend fun countJobs(projectId: String, purpose: String, targetId: String): Int = 0
+        override suspend fun findJobsWithStatuses(statuses: Collection<String>): List<GenerationJob> = emptyList()
+        override suspend fun deleteJobsForTargets(
+            projectId: String,
+            purpose: String,
+            targetIds: Collection<String>
+        ) = Unit
 
         override suspend fun findById(id: String): GenerationJob? = created?.takeIf { it.id == id }
 

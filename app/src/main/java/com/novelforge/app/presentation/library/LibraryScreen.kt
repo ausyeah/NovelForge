@@ -30,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -47,6 +48,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.novelforge.app.domain.model.Project
+import com.novelforge.app.domain.model.label
 import com.novelforge.app.domain.repository.ChapterRepository
 import com.novelforge.app.domain.repository.OutlineRepository
 import com.novelforge.app.domain.repository.ProjectRepository
@@ -89,7 +91,7 @@ class LibraryViewModel(
 
     fun open(project: Project) {
         viewModelScope.launch {
-            _novel.value = buildNovel(project.id, project.title, project.status.name)
+            _novel.value = buildNovel(project.id, project.title, project.status.label())
         }
     }
 
@@ -131,9 +133,9 @@ class LibraryViewModel(
     fun deleteChapter(projectId: String, orderIndex: Int) {
         viewModelScope.launch {
             val outline = outlineRepository.latest(projectId) ?: return@launch
-            val updated = outline.chapters
-                .filter { it.orderIndex != orderIndex }
-                .mapIndexed { index, item -> item.copy(orderIndex = index) }
+            // 保留原有 orderIndex（留洞）：重排会让 "chapter-N" id 与显示序号错位，
+            // 已写正文整本串章；新批次由生成端按最大序号续编
+            val updated = outline.chapters.filter { it.orderIndex != orderIndex }
             saveNewOutlineVersion(projectId, updated, "书架目录内删除章节")
         }
     }
@@ -159,7 +161,7 @@ class LibraryViewModel(
                 updatedAt = System.currentTimeMillis()
             )
         )
-        _novel.value = buildNovel(projectId, project.title, project.status.name)
+        _novel.value = buildNovel(projectId, project.title, project.status.label())
     }
 
     fun close() {
@@ -210,6 +212,69 @@ private val READER_THEMES = listOf(
     ReaderTheme("夜间", Color(0xFF16181D), Color(0xFFC9CDD4))
 )
 
+/** 默认「跟随」主题：与 App 深浅色模式绑定（浅色=纸面，深色=墨纸） */
+@Composable
+private fun followReaderTheme(): ReaderTheme {
+    val dark = com.novelforge.app.ui.theme.LocalNovelForgeDark.current
+    return if (dark) {
+        ReaderTheme("跟随", Color(0xFF171614), Color(0xFFDAD5CB))
+    } else {
+        ReaderTheme("跟随", Color(0xFFF7F4EC), Color(0xFF2B2620))
+    }
+}
+
+/** 阅读器正文 + 底部控制条；orderIndex 变化时整块重建，滚动位置自动归零 */
+@Composable
+private fun ReaderBody(
+    chapter: LibraryChapter,
+    textColor: Color,
+    fontSize: Int,
+    modifier: Modifier = Modifier,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+    themeName: String,
+    onCycleTheme: () -> Unit,
+    onShrinkFont: () -> Unit,
+    onGrowFont: () -> Unit
+) {
+    key(chapter.orderIndex) {
+        Column(
+            modifier = modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(
+                chapter.content ?: "",
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(vertical = 8.dp),
+                color = textColor,
+                fontSize = fontSize.sp,
+                lineHeight = (fontSize * 1.7).sp
+            )
+            // 底部：左「上一章/下一章」· 中主题 · 右「A-/A+」
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    OutlinedButton(onClick = onPrev) { Text("上一章") }
+                    OutlinedButton(onClick = onNext) { Text("下一章") }
+                }
+                TextButton(onClick = onCycleTheme) {
+                    Text("主题：$themeName")
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    OutlinedButton(onClick = onShrinkFont) { Text("A-") }
+                    OutlinedButton(onClick = onGrowFont) { Text("A+") }
+                }
+            }
+        }
+    }
+}
+
 private val COVER_COLORS = listOf(
     Color(0xFF5B4B8A), Color(0xFF2E6E65), Color(0xFF8A5B4B),
     Color(0xFF3E5C8A), Color(0xFF7A3E5C), Color(0xFF5C7A3E)
@@ -236,12 +301,13 @@ fun LibraryScreen(
     var deleteTarget by remember { mutableStateOf<Project?>(null) }
     var themeIndex by remember { mutableIntStateOf(0) }
     var fontSize by remember { mutableIntStateOf(18) }
+    val readerThemes = listOf(followReaderTheme()) + READER_THEMES
 
     // 返回逻辑：阅读 → 章节列表 → 书架 → 主页，一次只退一步
     BackHandler(enabled = reading != null) { reading = null }
     BackHandler(enabled = reading == null && novel != null) { viewModel.close() }
 
-    val readingTheme = if (reading != null) READER_THEMES[themeIndex] else null
+    val readingTheme = if (reading != null) readerThemes[themeIndex] else null
 
     Column(
         modifier = Modifier
@@ -254,7 +320,7 @@ fun LibraryScreen(
         when {
             reading != null && current != null -> {
                 val chapter = reading!!
-                val theme = READER_THEMES[themeIndex]
+                val theme = readerThemes[themeIndex]
                 // 顶栏：左「目录」· 中章节名 · 右「书架」
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -272,34 +338,28 @@ fun LibraryScreen(
                     )
                     TextButton(onClick = { viewModel.close(); reading = null }) { Text("书架 〉") }
                 }
-                Text(
-                    chapter.content ?: "",
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState())
-                        .padding(vertical = 8.dp),
-                    color = theme.text,
-                    fontSize = fontSize.sp,
-                    lineHeight = (fontSize * 1.7).sp
+                ReaderBody(
+                    chapter = chapter,
+                    textColor = theme.text,
+                    fontSize = fontSize,
+                    modifier = Modifier.weight(1f),
+                    onPrev = {
+                        current.chapters.lastOrNull { it.content != null && it.orderIndex < chapter.orderIndex }?.let {
+                            viewModel.recordRead(current.projectId, it.orderIndex)
+                            reading = it
+                        }
+                    },
+                    onNext = {
+                        current.chapters.firstOrNull { it.content != null && it.orderIndex > chapter.orderIndex }?.let {
+                            viewModel.recordRead(current.projectId, it.orderIndex)
+                            reading = it
+                        }
+                    },
+                    themeName = theme.name,
+                    onCycleTheme = { themeIndex = (themeIndex + 1) % readerThemes.size },
+                    onShrinkFont = { if (fontSize > 12) fontSize -= 2 },
+                    onGrowFont = { if (fontSize < 30) fontSize += 2 }
                 )
-                // 底部：主题与字体控制
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    TextButton(onClick = { themeIndex = (themeIndex + 1) % READER_THEMES.size }) {
-                        Text("主题：${theme.name}")
-                    }
-                    OutlinedButton(onClick = { if (fontSize > 12) fontSize -= 2 }) { Text("A-") }
-                    Text(
-                        "${fontSize}",
-                        modifier = Modifier.padding(horizontal = 8.dp),
-                        color = theme.text
-                    )
-                    OutlinedButton(onClick = { if (fontSize < 30) fontSize += 2 }) { Text("A+") }
-                }
             }
             current != null -> {
                 Text("《${current.title}》章节", style = MaterialTheme.typography.headlineSmall)
@@ -409,7 +469,7 @@ fun LibraryScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                "状态：${project.status}",
+                                "状态：${project.status.label()}",
                                 color = Color.White.copy(alpha = 0.8f),
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.align(Alignment.BottomStart)
@@ -506,7 +566,7 @@ fun LibraryScreen(
             text = {
                 Text(
                     "确定从《${novel?.title.orEmpty()}》删除 ${chapterLabel(chapter.orderIndex)}「${cleanChapterTitle(chapter.title)}」？" +
-                        "后续章节编号会自动前移，已生成的该章正文将不再显示。"
+                        "删除后该序号空出，后续章节编号保持不变；已生成的该章正文将不再显示。"
                 )
             },
             confirmButton = {

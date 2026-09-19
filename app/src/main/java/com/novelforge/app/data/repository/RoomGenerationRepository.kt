@@ -31,6 +31,9 @@ class RoomGenerationRepository(private val dao: GenerationJobDao) : GenerationRe
     override suspend fun countJobs(projectId: String, purpose: String, targetId: String): Int =
         dao.countJobs(projectId, purpose, targetId)
 
+    override suspend fun findJobsWithStatuses(statuses: Collection<String>): List<GenerationJob> =
+        dao.findWithStatuses(statuses).map { it.toDomain() }
+
     override suspend fun createJob(job: GenerationJob): GenerationJob {
         dao.insert(job.toEntity())
         return job
@@ -38,5 +41,13 @@ class RoomGenerationRepository(private val dao: GenerationJobDao) : GenerationRe
 
     override suspend fun updateJob(job: GenerationJob) {
         dao.upsert(job.toEntity())
+    }
+
+    override suspend fun deleteJobsForTargets(
+        projectId: String,
+        purpose: String,
+        targetIds: Collection<String>
+    ) {
+        if (targetIds.isNotEmpty()) dao.deleteForTargets(projectId, purpose, targetIds)
     }
 }

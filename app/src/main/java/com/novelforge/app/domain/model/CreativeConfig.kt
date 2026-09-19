@@ -2,6 +2,10 @@ package com.novelforge.app.domain.model
 
 import kotlinx.serialization.Serializable
 
+// 超长篇支持：章节数上限统一在此定义（1200 章目标 + 余量）
+const val MIN_CHAPTER_COUNT = 1
+const val MAX_CHAPTER_COUNT = 1_500
+
 @Serializable
 enum class WritingStyle {
     LITERARY,

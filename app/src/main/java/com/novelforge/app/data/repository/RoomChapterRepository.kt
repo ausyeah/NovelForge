@@ -18,4 +18,8 @@ class RoomChapterRepository(private val dao: ChapterRevisionDao) : ChapterReposi
     override suspend fun save(revision: ChapterRevision) {
         dao.upsert(revision.toEntity())
     }
+
+    override suspend fun deleteRevisionsForItems(projectId: String, outlineItemIds: Collection<String>) {
+        if (outlineItemIds.isNotEmpty()) dao.deleteForItems(projectId, outlineItemIds)
+    }
 }

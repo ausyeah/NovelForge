@@ -19,6 +19,7 @@ import com.novelforge.app.infrastructure.jobs.GenerationRuntime
 import com.novelforge.app.infrastructure.llm.JsonResponseValidator
 import com.novelforge.app.infrastructure.llm.JsonValidationResult
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
@@ -110,6 +111,69 @@ class OutlineViewModel(
             }
                 .onSuccess { activeJobId.value = it.id }
                 .onFailure { _error.value = it.message ?: "无法创建大纲生成任务" }
+        }
+    }
+
+    // ---------- 魔法棒：按作者手改方向润色本章大纲 ----------
+
+    /** 润色结果：屏幕端消费一次即清空（original 供撤回） */
+    data class WandResult(
+        val targetIndex: Int,
+        val original: OutlineItem,
+        val optimized: OutlineItem
+    )
+
+    private var optimizeJob: Job? = null
+
+    private val _optimizingIndex = MutableStateFlow<Int?>(null)
+    val optimizingIndex: StateFlow<Int?> = _optimizingIndex.asStateFlow()
+
+    private val _wandResult = MutableStateFlow<WandResult?>(null)
+    val wandResult: StateFlow<WandResult?> = _wandResult.asStateFlow()
+
+    fun optimizeChapter(items: List<OutlineItem>, index: Int) {
+        if (_optimizingIndex.value != null) return
+        val current = items.getOrNull(index) ?: return
+        _error.value = null
+        _optimizingIndex.value = index
+        optimizeJob = viewModelScope.launch {
+            try {
+                val project = requireNotNull(projectRepository.getProject(projectId)) { "项目不存在" }
+                val optimized = generationRuntime.optimizeOutlineDraft(
+                    project = project,
+                    current = current,
+                    previous = items.getOrNull(index - 1),
+                    next = items.getOrNull(index + 1)
+                )
+                _wandResult.value = WandResult(index, current, optimized)
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
+            } catch (e: Throwable) {
+                _error.value = "优化失败：${e.message ?: "未知错误"}"
+            } finally {
+                _optimizingIndex.value = null
+            }
+        }
+    }
+
+    fun stopOptimize() {
+        optimizeJob?.cancel()
+        optimizeJob = null
+        _optimizingIndex.value = null
+    }
+
+    fun consumeWandResult() {
+        _wandResult.value = null
+    }
+
+    // ---------- 用户手术：从本章起重写大纲 + 正文 ----------
+
+    fun regenerateFrom(item: OutlineItem) {
+        if (_optimizingIndex.value != null) stopOptimize()
+        _error.value = null
+        viewModelScope.launch {
+            runCatching { generationRuntime.regenerateFromChapter(projectId, item.id) }
+                .onFailure { _error.value = it.message ?: "重生成准备失败" }
         }
     }
 

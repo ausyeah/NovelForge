@@ -27,6 +27,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
 import com.novelforge.app.domain.model.CreativeConfig
+import com.novelforge.app.domain.model.MAX_CHAPTER_COUNT
+import com.novelforge.app.domain.model.MIN_CHAPTER_COUNT
 import com.novelforge.app.domain.model.Project
 import com.novelforge.app.domain.model.QuestData
 import com.novelforge.app.domain.model.ThrillFrequency
@@ -54,7 +56,7 @@ private val thrillOptions = listOf(
     ThrillFrequency.SLOW_BURN to "慢热铺垫",
     ThrillFrequency.CUSTOM to "自定义"
 )
-private val chapterOptions = listOf(1, 3, 6, 12, 20, 30, 50, 80, 100, 150, 200)
+private val chapterOptions = listOf(1, 3, 6, 12, 20, 30, 50, 80, 100, 150, 200, 300, 500, 1000, 1200)
 private val targetLengthOptions = listOf(2_000, 4_000, 6_000, 8_000)
 
 @Composable
@@ -288,7 +290,7 @@ fun CreativeSetupScreen(
             OutlinedTextField(
                 value = customChapterCount,
                 onValueChange = { customChapterCount = it.filter(Char::isDigit) },
-                label = { Text("自定义章节数（1-200）") },
+                label = { Text("自定义章节数（$MIN_CHAPTER_COUNT-$MAX_CHAPTER_COUNT）") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()

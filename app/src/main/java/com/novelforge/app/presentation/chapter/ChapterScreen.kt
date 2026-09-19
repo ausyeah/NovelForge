@@ -8,8 +8,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -18,7 +19,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -27,6 +27,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.novelforge.app.domain.model.ChapterRevision
 import com.novelforge.app.domain.model.GenerationJob
 import com.novelforge.app.domain.model.GenerationJobStatus
@@ -107,22 +108,23 @@ fun ChapterScreen(
         val visibleContent = revision?.content
             ?: job?.partialContent?.takeIf { it.isNotBlank() }
         if (visibleContent != null) {
-            // 中间生成框固定占满剩余空间，上下 UI 不随之移动；
-            // 内容增长时自动滚动跟随，用户上滑即暂停跟随，可用悬浮箭头恢复
-            val contentScroll = rememberScrollState()
-            var autoFollow by remember(job?.id) { mutableStateOf(true) }
-            var lastOffset by remember(job?.id) { mutableIntStateOf(0) }
+            // 段落级懒加载：流式增量只重组变化的段落，避免整章文本每次重排；
+            // 手势优先：仅贴底时跟随，用户滑动过程绝不做程序化滚动
+            val paragraphs = remember(visibleContent) { visibleContent.split("\n") }
+            val contentState = rememberLazyListState()
             val scope = rememberCoroutineScope()
-            LaunchedEffect(contentScroll) {
-                snapshotFlow { contentScroll.value }.collect { value ->
-                    if (contentScroll.isScrollInProgress && value < lastOffset - 8) {
-                        autoFollow = false
-                    }
-                    lastOffset = value
+            var followBottom by remember(job?.id) { mutableStateOf(true) }
+            LaunchedEffect(contentState) {
+                snapshotFlow {
+                    contentState.canScrollForward to contentState.isScrollInProgress
+                }.collect { (canForward, scrolling) ->
+                    if (scrolling) followBottom = !canForward
                 }
             }
-            LaunchedEffect(visibleContent, autoFollow) {
-                if (autoFollow) contentScroll.scrollTo(contentScroll.maxValue)
+            LaunchedEffect(paragraphs.size, visibleContent.length, followBottom) {
+                if (followBottom && !contentState.isScrollInProgress) {
+                    contentState.scrollToItem(paragraphs.lastIndex)
+                }
             }
             Text("正文${if (revision == null) "（任务中间结果）" else "（修订 ${revision.revision}）"}")
             Box(
@@ -130,18 +132,25 @@ fun ChapterScreen(
                     .weight(1f)
                     .fillMaxWidth()
             ) {
-                Text(
-                    visibleContent,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .verticalScroll(contentScroll)
-                        .padding(bottom = 48.dp)
-                )
-                if (contentScroll.value < contentScroll.maxValue - 120) {
+                LazyColumn(
+                    state = contentState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 48.dp)
+                ) {
+                    itemsIndexed(paragraphs) { _, paragraph ->
+                        Text(
+                            paragraph,
+                            modifier = Modifier.fillMaxWidth(),
+                            style = MaterialTheme.typography.bodyMedium,
+                            lineHeight = 23.sp
+                        )
+                    }
+                }
+                if (contentState.canScrollForward) {
                     SmallFloatingActionButton(
                         onClick = {
-                            autoFollow = true
-                            scope.launch { contentScroll.animateScrollTo(contentScroll.maxValue) }
+                            followBottom = true
+                            scope.launch { contentState.scrollToItem(paragraphs.lastIndex) }
                         },
                         modifier = Modifier
                             .align(Alignment.BottomCenter)

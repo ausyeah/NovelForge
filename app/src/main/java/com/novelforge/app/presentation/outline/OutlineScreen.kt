@@ -1,5 +1,6 @@
 package com.novelforge.app.presentation.outline
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -25,6 +26,7 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -45,7 +47,6 @@ import com.novelforge.app.infrastructure.llm.JsonResponseValidator
 import com.novelforge.app.infrastructure.llm.JsonValidationResult
 import com.novelforge.app.presentation.common.GenerationStatusCard
 import com.novelforge.app.presentation.common.chapterLabel
-import com.novelforge.app.presentation.common.cleanChapterTitle
 
 /** 存在中间产出、允许“修复 / 重试”的任务状态 */
 private val REPAIRABLE_STATUSES = setOf(
@@ -73,7 +74,12 @@ fun OutlineScreen(
     onSaveRaw: (String) -> Unit,
     onOpenChapter: (OutlineItem) -> Unit,
     onClearError: () -> Unit,
-    onBack: () -> Unit,
+    optimizingIndex: Int? = null,
+    wandResult: OutlineViewModel.WandResult? = null,
+    onOptimize: (List<OutlineItem>, Int) -> Unit = { _, _ -> },
+    onStopOptimize: () -> Unit = {},
+    onConsumeWand: () -> Unit = {},
+    onRegenerateFrom: (OutlineItem) -> Unit = {},
     plannedChapterCount: Int? = null
 ) {
     val outline = versions.firstOrNull()
@@ -104,12 +110,88 @@ fun OutlineScreen(
     var showRawEditor by remember(job?.id) { mutableStateOf(false) }
     var fixHint by remember { mutableStateOf<String?>(null) }
     var confirmRegen by remember { mutableStateOf(false) }
+    // 魔法棒撤回槽：itemId -> 优化前原条目；用户再手动编辑该章即作废
+    var undoSlot by remember(outline?.id) { mutableStateOf<Pair<String, OutlineItem>?>(null) }
+    var regenTarget by remember { mutableStateOf<OutlineItem?>(null) }
+    LaunchedEffect(wandResult) {
+        val result = wandResult ?: return@LaunchedEffect
+        if (result.targetIndex in draftItems.indices &&
+            draftItems[result.targetIndex].id == result.optimized.id
+        ) {
+            draftItems = draftItems.mapIndexed { i, item ->
+                if (i == result.targetIndex) result.optimized else item
+            }
+            undoSlot = result.optimized.id to result.original
+        }
+        onConsumeWand()
+    }
     val writtenCount = writtenChapterIds.size
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val editorActive = showRawEditor && hasRawOutput && repairable
     val busy = job?.status == GenerationJobStatus.RUNNING || job?.status == GenerationJobStatus.QUEUED
     val chapterBusy = chapterJob?.status == GenerationJobStatus.RUNNING ||
         chapterJob?.status == GenerationJobStatus.QUEUED
+    // 单章详情打开时收起总览区的开关/生成按钮，把整页让给详情（一键全自动下沉到详情顶部）
+    val detailOpen = detailIndex != null
+
+    val anyBusy = busy || chapterBusy
+    val isRegen = outline != null &&
+        outline.chapters.size >= (plannedChapterCount ?: outline.chapters.size)
+    val generateLabel = when {
+        outline == null -> "生成大纲"
+        !isRegen -> "继续生成大纲（第 ${outline.chapters.size + 1} 章起）"
+        else -> "重新生成大纲"
+    }
+    // 总览与详情共用的按钮组（详情模式下不渲染，一键全自动由详情页顶部提供）
+    val overviewButtons = @Composable {
+        if (!anyBusy) {
+            Button(
+                onClick = onStartAutoRun,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("▶ 一键全自动生成全书（大纲 + 正文）")
+            }
+        }
+        if (!busy) {
+            OutlinedButton(
+                onClick = {
+                    if (isRegen && writtenChapterIds.isNotEmpty()) {
+                        confirmRegen = true
+                    } else {
+                        onGenerate(!isRegen)
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) { Text(generateLabel) }
+        }
+        if (busy) {
+            Button(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
+                Text("取消生成")
+            }
+        } else if (job != null && job.status in REPAIRABLE_STATUSES) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = {
+                        fixHint = null
+                        if (hasRawOutput) showRawEditor = !showRawEditor
+                    },
+                    modifier = Modifier.weight(1f)
+                ) { Text(if (showRawEditor && hasRawOutput) "收起修复" else "修复") }
+                Button(
+                    onClick = {
+                        fixHint = null
+                        // 重试 = 续跑当前批次：必须以最新大纲版本回填 checkpoint，
+                        // 否则 FAILED/CANCELLED 会新建空任务并从引子重跑覆盖整书大纲
+                        onGenerate(true)
+                    },
+                    modifier = Modifier.weight(1f)
+                ) { Text("重试") }
+            }
+            if (!hasRawOutput) {
+                fixHint = "本次模型没有返回任何文字（多为服务端限流或流被中断），没有内容可修复，请直接点「重试」。"
+            }
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -119,16 +201,19 @@ fun OutlineScreen(
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 "《$projectTitle》大纲",
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
             Text(
                 "全自动",
                 style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.align(Alignment.CenterVertically)
+                modifier = Modifier.padding(start = 8.dp)
             )
             Switch(checked = autoRun, onCheckedChange = onToggleAutoRun)
         }
@@ -159,69 +244,8 @@ fun OutlineScreen(
             }
         )
 
-        val anyBusy = busy || chapterBusy
-        val latestChapterItem = versions.firstOrNull()?.chapters
-            ?.firstOrNull { it.id == chapterJob?.targetId }
-        val isRegen = outline != null &&
-            outline.chapters.size >= (plannedChapterCount ?: outline.chapters.size)
-        val generateLabel = when {
-            outline == null -> "生成大纲"
-            !isRegen -> "继续生成大纲（第 ${outline.chapters.size + 1} 章起）"
-            else -> "重新生成大纲"
-        }
-        if (!anyBusy) {
-            Button(
-                onClick = onStartAutoRun,
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("▶ 一键全自动生成全书（大纲 + 正文）")
-            }
-        }
-        if (!busy) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = {
-                        if (isRegen && writtenChapterIds.isNotEmpty()) {
-                            confirmRegen = true
-                        } else {
-                            onGenerate(!isRegen)
-                        }
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text(generateLabel) }
-                OutlinedButton(
-                    onClick = { latestChapterItem?.let(onOpenChapter) },
-                    enabled = latestChapterItem != null,
-                    modifier = Modifier.weight(1f)
-                ) {
-                    Text(if (chapterBusy) "查看正在生成的正文" else "查看当前正文")
-                }
-            }
-        }
-        if (busy) {
-            Button(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
-                Text("取消生成")
-            }
-        } else if (job != null && job.status in REPAIRABLE_STATUSES) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = {
-                        fixHint = null
-                        if (hasRawOutput) showRawEditor = !showRawEditor
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text(if (showRawEditor && hasRawOutput) "收起修复" else "修复") }
-                Button(
-                    onClick = {
-                        fixHint = null
-                        onGenerate(false)
-                    },
-                    modifier = Modifier.weight(1f)
-                ) { Text("重试") }
-            }
-            if (!hasRawOutput) {
-                fixHint = "本次模型没有返回任何文字（多为服务端限流或流被中断），没有内容可修复，请直接点「重试」。"
-            }
+        if (!detailOpen) {
+            overviewButtons()
         }
         if (error != null) {
             Text("提示：$error")
@@ -261,24 +285,42 @@ fun OutlineScreen(
                 }
             }
             detailIndex != null -> {
-                // 单章详情：编辑 + 导航 + 写这一章
+                // 单章详情：一键全自动 + 标题 + 概要 + ✦/↻ + 上一章/下一章 + 写这一章/保存
+                val detailItem = draftItems.getOrNull(detailIndex!!)
                 ChapterDetailPane(
                     draftItems = draftItems,
                     index = detailIndex!!,
                     modifier = Modifier.fillMaxWidth().weight(1f),
-                    locked = draftItems[detailIndex!!].id in writtenChapterIds,
+                    locked = detailItem != null && detailItem.id in writtenChapterIds,
+                    wandBusy = optimizingIndex == detailIndex,
+                    canUndo = detailItem != null && undoSlot?.first == detailItem.id,
+                    dirty = draftItems != outline.chapters,
+                    anyBusy = anyBusy,
+                    onStartAutoRun = onStartAutoRun,
+                    onDetailClose = { detailIndex = null },
+                    onWandToggle = { item, index ->
+                        when {
+                            optimizingIndex != null -> onStopOptimize()
+                            undoSlot?.first == item.id -> {
+                                val saved = undoSlot?.second
+                                if (saved != null) {
+                                    draftItems = draftItems.map {
+                                        if (it.id == saved.id) saved else it
+                                    }
+                                }
+                                undoSlot = null
+                            }
+                            else -> onOptimize(draftItems, index)
+                        }
+                    },
+                    onRegenerate = { detailItem?.let { regenTarget = it } },
                     onIndexChange = { detailIndex = it },
                     onValueChange = { updated ->
+                        if (undoSlot?.first == updated.id) undoSlot = null
                         draftItems = draftItems.map { if (it.id == updated.id) updated else it }
                     },
-                    onMove = { from, to -> draftItems = move(draftItems, from, to) },
                     onSaveOutline = { onSave(draftItems) },
-                    onOpenChapter = { item ->
-                        detailIndex = null
-                        onOpenChapter(item)
-                    },
-                    onClose = { detailIndex = null },
-                    dirty = draftItems != outline.chapters
+                    onOpenChapter = { item -> onOpenChapter(item) }
                 )
             }
             else -> {
@@ -323,7 +365,8 @@ fun OutlineScreen(
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
                                         Text(
-                                            "${chapterLabel(item.orderIndex)} · ${cleanChapterTitle(item.title)}",
+                                            // 魔法棒润色过的标题自带「第X章」，不再拼前缀避免重复
+                                            item.title.ifBlank { chapterLabel(item.orderIndex) },
                                             fontWeight = FontWeight.Bold,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
@@ -350,10 +393,6 @@ fun OutlineScreen(
                 }
             }
         }
-
-        Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-            Text("返回项目列表")
-        }
     }
 
     if (confirmRegen) {
@@ -375,6 +414,33 @@ fun OutlineScreen(
             },
             dismissButton = {
                 TextButton(onClick = { confirmRegen = false }) { Text("取消") }
+            }
+        )
+    }
+
+    regenTarget?.let { target ->
+        val tail = draftItems.dropWhile { it.id != target.id }
+        val writtenTail = tail.count { it.id in writtenChapterIds }
+        AlertDialog(
+            onDismissRequest = { regenTarget = null },
+            title = { Text("从 ${chapterLabel(target.orderIndex)} 起重生成？") },
+            text = {
+                Text(
+                    "将删除本章及之后共 ${tail.size} 章的大纲，" +
+                        "其中 $writtenTail 章已写好的正文也会被永久删除（不可恢复）。" +
+                        "之后点「继续生成大纲 / 一键全自动」将从这一章重新起跑。确定吗？"
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    regenTarget = null
+                    undoSlot = null
+                    detailIndex = null
+                    onRegenerateFrom(target)
+                }) { Text("确认覆盖并重生成", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { regenTarget = null }) { Text("取消") }
             }
         )
     }
@@ -417,23 +483,35 @@ private fun ChapterDetailPane(
     index: Int,
     modifier: Modifier = Modifier,
     locked: Boolean,
+    wandBusy: Boolean,
+    canUndo: Boolean,
+    dirty: Boolean,
+    anyBusy: Boolean,
+    onStartAutoRun: () -> Unit,
+    onDetailClose: () -> Unit,
+    onWandToggle: (OutlineItem, Int) -> Unit,
+    onRegenerate: () -> Unit,
     onIndexChange: (Int?) -> Unit,
     onValueChange: (OutlineItem) -> Unit,
-    onMove: (Int, Int) -> Unit,
     onSaveOutline: () -> Unit,
-    onOpenChapter: (OutlineItem) -> Unit,
-    onClose: () -> Unit,
-    dirty: Boolean
+    onOpenChapter: (OutlineItem) -> Unit
 ) {
     val item = draftItems.getOrNull(index) ?: return
+    // 删除「返回大纲总览」按钮后，系统返回手势负责收起详情
+    BackHandler(enabled = !wandBusy, onBack = onDetailClose)
     Column(
-        modifier = modifier.verticalScroll(rememberScrollState()),
+        modifier = modifier,
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Text("${chapterLabel(item.orderIndex)} · 章节详情", fontWeight = FontWeight.Bold)
+        if (!anyBusy) {
+            Button(onClick = onStartAutoRun, modifier = Modifier.fillMaxWidth()) {
+                Text("▶ 一键全自动生成全书（大纲 + 正文）")
+            }
+        }
+        Text(item.title.ifBlank { chapterLabel(item.orderIndex) }, fontWeight = FontWeight.Bold)
         if (locked) {
             Text(
-                "本章已生成正文，大纲已锁定（防止改动破坏已保存的内容）",
+                "本章已生成正文：改大纲不会自动改正文；觉得写坏了用下方「从此章重生成」连正文一起重写",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.primary
             )
@@ -442,17 +520,38 @@ private fun ChapterDetailPane(
             value = item.title,
             onValueChange = { value -> onValueChange(item.copy(title = value)) },
             label = { Text("标题") },
-            readOnly = locked,
+            singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
+        // 概要框固定占满剩余高度，长文在框内滚动，避免整页滚动影响翻页
         OutlinedTextField(
             value = item.summary,
             onValueChange = { value -> onValueChange(item.copy(summary = value)) },
             label = { Text("概要") },
-            readOnly = locked,
-            minLines = 4,
-            modifier = Modifier.fillMaxWidth()
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
         )
+        // 魔法棒：按上面手改的方向润色本章大纲；跑完变「撤回」，再手动编辑即失效
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = { onWandToggle(item, index) },
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    when {
+                        wandBusy -> "■ 停止优化"
+                        canUndo -> "↺ 撤回优化"
+                        else -> "✦ 魔法棒优化"
+                    }
+                )
+            }
+            OutlinedButton(
+                onClick = onRegenerate,
+                modifier = Modifier.weight(1f)
+            ) { Text("↻ 从此章重生成") }
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(
                 onClick = { onIndexChange(index - 1) },
@@ -466,18 +565,6 @@ private fun ChapterDetailPane(
             ) { Text("下一章 〉") }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(
-                onClick = { onMove(index, index - 1) },
-                enabled = index > 0,
-                modifier = Modifier.weight(1f)
-            ) { Text("上移") }
-            OutlinedButton(
-                onClick = { onMove(index, index + 1) },
-                enabled = index < draftItems.lastIndex,
-                modifier = Modifier.weight(1f)
-            ) { Text("下移") }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = { onOpenChapter(item) }, modifier = Modifier.weight(1f)) {
                 Text("写这一章")
             }
@@ -487,17 +574,7 @@ private fun ChapterDetailPane(
                 modifier = Modifier.weight(1f)
             ) { Text("保存大纲") }
         }
-        OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
-            Text("返回大纲总览")
-        }
     }
-}
-
-private fun move(items: List<OutlineItem>, from: Int, to: Int): List<OutlineItem> {
-    val mutable = items.toMutableList()
-    val value = mutable.removeAt(from)
-    mutable.add(to, value)
-    return mutable.mapIndexed { index, item -> item.copy(orderIndex = index) }
 }
 
 private fun jobStatusText(job: GenerationJob?): String = when (job?.status) {

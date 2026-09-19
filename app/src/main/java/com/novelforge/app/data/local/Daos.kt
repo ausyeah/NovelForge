@@ -68,6 +68,12 @@ interface ChapterRevisionDao {
 
     @Query("DELETE FROM chapter_revisions WHERE projectId = :projectId")
     suspend fun deleteForProject(projectId: String)
+
+    @Query(
+        "DELETE FROM chapter_revisions " +
+            "WHERE projectId = :projectId AND outlineItemId IN (:outlineItemIds)"
+    )
+    suspend fun deleteForItems(projectId: String, outlineItemIds: Collection<String>)
 }
 
 @Dao
@@ -106,11 +112,17 @@ interface GenerationJobDao {
     )
     fun observeLatest(projectId: String, purpose: String): Flow<GenerationJobEntity?>
 
+    /** 只统计失败类任务：手动取消/成功历史不应吃掉自动重试预算 */
     @Query(
         "SELECT COUNT(*) FROM generation_jobs " +
-            "WHERE projectId = :projectId AND purpose = :purpose AND targetId = :targetId"
+            "WHERE projectId = :projectId AND purpose = :purpose AND targetId = :targetId " +
+            "AND status IN ('FAILED', 'NEEDS_USER', 'RECOVERABLE_PARTIAL')"
     )
     suspend fun countJobs(projectId: String, purpose: String, targetId: String): Int
+
+    /** 启动清扫僵尸任务用：进程被杀后残留的 QUEUED/RUNNING */
+    @Query("SELECT * FROM generation_jobs WHERE status IN (:statuses)")
+    suspend fun findWithStatuses(statuses: Collection<String>): List<GenerationJobEntity>
 
     @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(job: GenerationJobEntity)
@@ -120,6 +132,12 @@ interface GenerationJobDao {
 
     @Query("DELETE FROM generation_jobs WHERE projectId = :projectId")
     suspend fun deleteForProject(projectId: String)
+
+    @Query(
+        "DELETE FROM generation_jobs " +
+            "WHERE projectId = :projectId AND purpose = :purpose AND targetId IN (:targetIds)"
+    )
+    suspend fun deleteForTargets(projectId: String, purpose: String, targetIds: Collection<String>)
 }
 
 @Dao

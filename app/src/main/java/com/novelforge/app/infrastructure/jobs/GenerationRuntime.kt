@@ -6,6 +6,7 @@ import androidx.work.Constraints
 import androidx.work.ExistingWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import com.novelforge.app.data.security.ApiKeyStore
@@ -19,8 +20,11 @@ import com.novelforge.app.domain.model.GenerationJobStatus
 import com.novelforge.app.domain.model.GenerationPurpose
 import com.novelforge.app.domain.model.LlmCall
 import com.novelforge.app.domain.model.LlmUsage
+import com.novelforge.app.domain.model.MAX_CHAPTER_COUNT
+import com.novelforge.app.domain.model.MIN_CHAPTER_COUNT
 import com.novelforge.app.domain.model.OutlineItem
 import com.novelforge.app.domain.model.OutlineVersion
+import com.novelforge.app.domain.model.Project
 import com.novelforge.app.domain.model.ProjectStatus
 import com.novelforge.app.domain.model.PromptSnapshot
 import com.novelforge.app.domain.repository.ChapterRepository
@@ -51,10 +55,12 @@ import com.novelforge.app.infrastructure.llm.ResponseFormat
 import com.novelforge.app.infrastructure.llm.ResponseFormatKind
 import java.io.IOException
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.serialization.decodeFromString
@@ -108,6 +114,8 @@ class GenerationRuntime(
         val canonicalContent: String,
         val hasPendingOutput: Boolean,
         val totalChapterCount: Int,
+        /** 下一批新章节应占用的 0 基序号（= 已有最大 orderIndex + 1，容忍删章留洞） */
+        val nextOrderIndex: Int,
         val currentChapterNumber: Int
     )
 
@@ -124,6 +132,39 @@ class GenerationRuntime(
 
     suspend fun setAutoRun(enabled: Boolean) {
         settingsStore.update { it.copy(autoRunEnabled = enabled) }
+    }
+
+    /**
+     * 启动清扫：进程被杀（force-stop / 系统回收）后 WorkManager 的 UniqueWork 已消失，
+     * 但库里还挂着 QUEUED/RUNNING——driveAutoNext 会把这些僵尸任务当成"正在跑"，
+     * 整条全自动流水线就此卡死。逐个核对 WorkManager，已终结的直接收尸为 FAILED。
+     */
+    suspend fun sweepZombieJobs() {
+        val zombies = generationRepository.findJobsWithStatuses(
+            listOf(GenerationJobStatus.QUEUED.name, GenerationJobStatus.RUNNING.name)
+        )
+        if (zombies.isEmpty()) return
+        for (job in zombies) {
+            val states = runCatching {
+                withContext(Dispatchers.IO) {
+                    workManager.getWorkInfosForUniqueWork(uniqueWorkName(job.id)).get()
+                }
+            }.getOrNull()
+            val alive = states?.any {
+                it.state == WorkInfo.State.RUNNING || it.state == WorkInfo.State.ENQUEUED
+            } == true
+            if (alive) continue
+            // 有检查点内容的正文/大纲任务收尸为 RECOVERABLE_PARTIAL 会被重试覆盖旧流，
+            // 统一记 FAILED：UI 出现「重试」，重试路径自带 checkpoint 回填
+            generationRepository.updateJob(
+                job.copy(
+                    status = GenerationJobStatus.FAILED,
+                    errorType = "ZombieJob",
+                    errorMessage = "生成进程曾被中断（应用被关闭或重启），任务已停止。点击「重试」即可继续。",
+                    updatedAt = now()
+                )
+            )
+        }
     }
 
     /**
@@ -146,7 +187,7 @@ class GenerationRuntime(
         val settings = settingsStore.settings.first()
         if (!settings.autoRunEnabled) return
         val project = projectRepository.getProject(projectId) ?: return
-        val total = project.creativeConfig?.chapterCount?.coerceIn(1, 200) ?: return
+        val total = project.creativeConfig?.chapterCount?.coerceIn(MIN_CHAPTER_COUNT, MAX_CHAPTER_COUNT) ?: return
         val outline = outlineRepository.latest(projectId)
         val chapters = outline?.chapters?.sortedBy { it.orderIndex }.orEmpty()
         if (chapters.isEmpty()) {
@@ -167,11 +208,28 @@ class GenerationRuntime(
             chapterRepository.latest(projectId, chapter.id) == null
         }
         if (nextChapter != null) {
-            // 同一章失败自动重试的次数上限：3 次任务都失败则停下等用户处理
+            // 同一章失败自动重试的次数上限：3 次失败任务则显式停下等用户处理
             val attempts = generationRepository.countJobs(
                 projectId, GenerationPurpose.CHAPTER.name, nextChapter.id
             )
-            if (attempts >= 3) return
+            if (attempts >= MAX_AUTO_ATTEMPTS_PER_CHAPTER) {
+                // 不再静默停摆：把最新失败任务升级为“需要处理”，章节页会出现重试按钮和说明
+                val stalled = generationRepository.findLatestJob(
+                    projectId, GenerationPurpose.CHAPTER.name, nextChapter.id
+                )
+                if (stalled != null && stalled.status != GenerationJobStatus.NEEDS_USER) {
+                    generationRepository.updateJob(
+                        stalled.copy(
+                            status = GenerationJobStatus.NEEDS_USER,
+                            errorMessage = "这一章已连续失败 $attempts 次，自动续写已停止。" +
+                                "请在章节页点「重试这一章」单独再试；若总是报空内容，多半是模型思考烧光了额度，" +
+                                "请在模型设置里开启「关闭思考」或加大输出预算。",
+                            updatedAt = now()
+                        )
+                    )
+                }
+                return
+            }
             val active = generationRepository.findActiveJob(
                 projectId, GenerationPurpose.CHAPTER.name, nextChapter.id
             )
@@ -196,7 +254,7 @@ class GenerationRuntime(
                 context = context,
                 clientRequestId = "auto-${projectId}-${nextChapter.id}-${System.currentTimeMillis()}"
             )
-        } else if (chapters.size < total) {
+        } else if ((chapters.maxOfOrNull { it.orderIndex } ?: -1) + 1 < total) {
             // 本轮正文全部写完 → 下一批大纲
             // （PAUSED 的旧任务会被 queueOutline 复用并以 REPLACE 重新入队）
             queueOutline(projectId, continueFromExisting = true)
@@ -269,6 +327,153 @@ class GenerationRuntime(
         purpose: GenerationPurpose,
         targetId: String?
     ): GenerationJob? = generationRepository.findActiveJob(projectId, purpose.name, targetId)
+
+    /**
+     * 魔法棒：以作者手改过的概要为准，结合前后章与设定润色本章大纲。
+     * 一次性调用，不进任务管线：失败只回报错误，不产生任何持久状态。
+     */
+    suspend fun optimizeOutlineDraft(
+        project: Project,
+        current: OutlineItem,
+        previous: OutlineItem?,
+        next: OutlineItem?
+    ): OutlineItem {
+        val settings = settingsStore.settings.first()
+        val creative = requireNotNull(project.creativeConfig) { "请先完成创作设置" }
+        // 强制关思考：润色任务要的是快和稳，思考模型会把大量 token 烧在 reasoning 上
+        val config = connection(settings).copy(
+            capabilities = ProviderCapabilities(
+                supportsStreaming = false,
+                supportsJsonObject = false,
+                supportsUsageInStream = false
+            ),
+            disableThinking = true
+        )
+        val response = llmClient.chat(
+            ChatRequest(
+                messages = listOf(
+                    ChatMessage(
+                        ChatRole.SYSTEM,
+                        "你是网络小说大纲编辑，负责把作者手写的章节走向润色成完整可执行的章节大纲。" +
+                            "标题必须以「第X章」开头（用给定的章节号，如「第 12 章 xxx」），这三个字必须有；概要里不要出现章节编号。" +
+                            "只输出一个 JSON 对象，不要解释、不要代码围栏。"
+                    ),
+                    ChatMessage(
+                        ChatRole.USER,
+                        """
+                        《${project.title}》第 ${current.orderIndex + 1} 章的大纲刚被作者手动改写，这个方向是作者定的剧情走向，必须严格遵守，禁止改回原走向或引入新的重大事件。
+                        你的任务：把它润色成完整章节大纲——写清本章故事如何发展、冲突如何变化、人物或局势发生什么变化、为下一章留下什么方向；与前后章自然衔接。只润色，不写正文。
+
+                        【本章标题】${current.title}
+                        【本章概要（作者手改，剧情以此为准）】${current.summary}
+                        【上一章】${previous?.let { "《${it.title}》：${it.summary}" } ?: "无（本章是开篇）"}
+                        【下一章】${next?.let { "《${it.title}》：${it.summary}" } ?: "暂无（本章是目前最后一章，自由留方向）"}
+                        【创作设定】题材标签：${creative.genreTags.joinToString("、").ifBlank { "未指定" }}；每章正文目标 ${creative.targetLength} 字
+                        【世界观资料】${json.encodeToString(project.questData.answers)}
+
+                        只返回如下 JSON：{"title":"必须以「第 ${current.orderIndex + 1} 章」开头的完整标题","summary":"优化后的概要（纯内容，不带编号）"}
+                        """.trimIndent()
+                    )
+                ),
+                config = config,
+                options = ChatOptions(
+                    outputTokenBudget = 1_024,
+                    requestId = "wand-${jobIdTag()}",
+                    timeoutMs = 90_000L
+                )
+            )
+        )
+        val raw = stripInlineReasoning(response.content)
+        JsonResponseValidator.extractJsonValue(raw)?.let { candidate ->
+            when (val parsed = validator.parseOutline(candidate)) {
+                is com.novelforge.app.infrastructure.llm.JsonValidationResult.Success -> {
+                    parsed.value.firstOrNull()?.takeIf { it.summary.isNotBlank() }?.let { item ->
+                        val body = item.title.trim().ifBlank { current.title }
+                        return current.copy(
+                            title = ensureChapterNumber(body, current.orderIndex),
+                            summary = item.summary.trim()
+                        )
+                    }
+                }
+                is com.novelforge.app.infrastructure.llm.JsonValidationResult.Failure -> Unit
+            }
+        }
+        // 模型没给 JSON 但给了像样的文字：直接当新概要用，不让一次好润色白费
+        val plain = raw.trim()
+        if (plain.length >= 8 && !plain.startsWith("{") && !plain.startsWith("[")) {
+            return current.copy(
+                title = ensureChapterNumber(current.title, current.orderIndex),
+                summary = plain
+            )
+        }
+        error("模型没有返回可用的润色结果，请重试")
+    }
+
+    private val anyChapterNumberPrefix = Regex(
+        "^(引子|楔子|序章|序幕|第\\s*[0-9〇零一二两三四五六七八九十百千]+\\s*[章回节]|chapter\\s*\\d+)\\s*[:：·•\\-—～~\\s]*",
+        RegexOption.IGNORE_CASE
+    )
+
+    /** 润色标题统一带上「第 X 章」前缀（引子章加「引子」），避免与展示层编号重复或缺失 */
+    private fun ensureChapterNumber(title: String, orderIndex: Int): String {
+        val body = anyChapterNumberPrefix.replace(title.trim(), "").trim().ifBlank { title.trim() }
+        val prefix = if (orderIndex <= 0) "引子" else "第 $orderIndex 章"
+        return if (body.startsWith(prefix)) body else "$prefix $body"
+    }
+
+    /**
+     * 用户手术「从此章重生成」：删除本章及之后的全部大纲与已写正文，
+     * 把大纲任务检查点回拨到截断前缀（PAUSED），之后走正常的继续生成流程。
+     * 硬删是故意的：保留旧正文会让重生成的同号章节直接复用写烂的内容。
+     */
+    suspend fun regenerateFromChapter(projectId: String, outlineItemId: String) {
+        val outline = outlineRepository.latest(projectId) ?: return
+        val ordered = outline.chapters.sortedBy { it.orderIndex }
+        val cut = ordered.indexOfFirst { it.id == outlineItemId }
+        require(cut >= 0) { "章节已变动，请返回大纲页刷新后重试" }
+        val doomed = ordered.drop(cut)
+        val doomedIds = doomed.map { it.id }
+
+        generationRepository.findActiveJob(projectId, GenerationPurpose.OUTLINE.name, null)
+            ?.let { cancel(it.id) }
+        doomedIds.forEach { id ->
+            generationRepository.findActiveJob(projectId, GenerationPurpose.CHAPTER.name, id)
+                ?.let { cancel(it.id) }
+        }
+        chapterRepository.deleteRevisionsForItems(projectId, doomedIds)
+        generationRepository.deleteJobsForTargets(projectId, GenerationPurpose.CHAPTER.name, doomedIds)
+
+        val prefix = ordered.take(cut)
+        val truncated = outline.copy(
+            id = UUID.randomUUID().toString(),
+            version = outline.version + 1,
+            chapters = prefix,
+            diffSummary = "用户手术：从第 ${doomed.first().orderIndex + 1} 号章节起重写",
+            createdAt = now()
+        )
+        val project = requireNotNull(projectRepository.getProject(projectId)) { "项目不存在" }
+        generationArtifactRepository.saveOutlineAndProject(
+            truncated,
+            project.copy(flowState = FlowState.OUTLINE_EDIT, updatedAt = now())
+        )
+        generationRepository.findLatestJob(projectId, GenerationPurpose.OUTLINE.name, null)?.let { job ->
+            generationRepository.updateJob(
+                job.copy(
+                    status = GenerationJobStatus.PAUSED,
+                    partialContent = if (prefix.isEmpty()) {
+                        ""
+                    } else {
+                        json.encodeToString(OutlineEnvelope(prefix))
+                    },
+                    errorType = null,
+                    errorMessage = null,
+                    updatedAt = now()
+                )
+            )
+        }
+    }
+
+    private fun jobIdTag(): String = UUID.randomUUID().toString().take(8)
 
     suspend fun cancel(jobId: String) {
         generationRepository.findById(jobId)?.let { job ->
@@ -418,7 +623,13 @@ class GenerationRuntime(
                 currentJob.copy(
                     status = GenerationJobStatus.RECOVERABLE_PARTIAL,
                     errorType = error::class.simpleName,
-                    errorMessage = "第 ${readOutlineProgress(currentJob.partialContent, 200).currentChapterNumber} 章请求失败，可重试继续生成",
+                    errorMessage = "第 ${readOutlineProgress(
+                        currentJob.partialContent,
+                        projectRepository.getProject(currentJob.projectId)
+                            ?.creativeConfig?.chapterCount
+                            ?.coerceIn(MIN_CHAPTER_COUNT, MAX_CHAPTER_COUNT)
+                            ?: MAX_CHAPTER_COUNT
+                    ).currentChapterNumber} 章请求失败，可重试继续生成",
                     updatedAt = now()
                 )
             } else {
@@ -447,9 +658,9 @@ class GenerationRuntime(
     ): PreparedExecution {
         val project = requireNotNull(projectRepository.getProject(job.projectId)) { "项目不存在" }
         val creativeConfig = checkNotNull(project.creativeConfig) { "请先完成创作设置" }
-        val totalChapterCount = creativeConfig.chapterCount.coerceIn(1, 200)
+        val totalChapterCount = creativeConfig.chapterCount.coerceIn(MIN_CHAPTER_COUNT, MAX_CHAPTER_COUNT)
         val progress = readOutlineProgress(job.partialContent, totalChapterCount)
-        if (progress.chapters.size >= totalChapterCount) {
+        if (progress.nextOrderIndex >= totalChapterCount) {
             return PreparedExecution(job, request = null, outlineProgress = progress)
         }
 
@@ -491,6 +702,7 @@ class GenerationRuntime(
                 canonicalContent = "",
                 hasPendingOutput = false,
                 totalChapterCount = totalChapterCount,
+                nextOrderIndex = 0,
                 currentChapterNumber = 1
             )
         }
@@ -501,6 +713,7 @@ class GenerationRuntime(
                 canonicalContent = "",
                 hasPendingOutput = true,
                 totalChapterCount = totalChapterCount,
+                nextOrderIndex = 0,
                 currentChapterNumber = 1
             )
         }
@@ -511,6 +724,7 @@ class GenerationRuntime(
                     canonicalContent = "",
                     hasPendingOutput = true,
                     totalChapterCount = totalChapterCount,
+                    nextOrderIndex = 0,
                     currentChapterNumber = 1
                 )
 
@@ -521,13 +735,17 @@ class GenerationRuntime(
                 } else {
                     ""
                 }
-                val chapters = parsed.value.mapIndexed { index, item -> item.copy(orderIndex = index) }
+                // 不按位置重编 orderIndex/id：检查点里存的就是权威序号，
+                // 重编会抹平删章留洞，让新批次 "chapter-N" 与既有章节撞号串章
+                val chapters = parsed.value
+                val nextOrderIndex = (chapters.maxOfOrNull { it.orderIndex }?.plus(1)) ?: 0
                 OutlineProgress(
                     chapters = chapters,
                     canonicalContent = json.encodeToString(OutlineEnvelope(chapters)),
                     hasPendingOutput = suffix.isNotBlank(),
                     totalChapterCount = totalChapterCount,
-                    currentChapterNumber = (chapters.size + 1).coerceAtMost(totalChapterCount)
+                    nextOrderIndex = nextOrderIndex,
+                    currentChapterNumber = (nextOrderIndex + 1).coerceAtMost(totalChapterCount)
                 )
             }
         }
@@ -599,10 +817,10 @@ class GenerationRuntime(
             }
 
             is com.novelforge.app.infrastructure.llm.JsonValidationResult.Success -> {
-                // 分批生成：一批可能返回多个推进段；统一重编号后追加，
-                // 只保留未完成章节所需数量，防止模型多给导致章节数超限
+                // 分批生成：一批可能返回多个推进段；按 nextOrderIndex（已有最大序号+1）续编，
+                // 删章留洞也不会让新 id 与既有 "chapter-N" 撞号
                 val start = progress.currentChapterNumber
-                val remaining = (progress.totalChapterCount - progress.chapters.size).coerceAtLeast(0)
+                val remaining = (progress.totalChapterCount - progress.nextOrderIndex).coerceAtLeast(0)
                 val newItems = parsed.value.take(remaining).mapIndexed { index, item ->
                     item.copy(
                         id = "chapter-${start + index}",
@@ -632,7 +850,7 @@ class GenerationRuntime(
                     errorMessage = null,
                     updatedAt = now()
                 )
-                if (chapters.size < progress.totalChapterCount) {
+                if (progress.nextOrderIndex + newItems.size < progress.totalChapterCount) {
                     // 轮次机制：每批（10 章）完成后暂停，等本批正文写完再继续下一批；
                     // 先把当前累积大纲落为版本，供用户查看/编辑
                     val result = persistOutline(
@@ -963,6 +1181,7 @@ class GenerationRuntime(
         private const val TAG = "novelforge-generation"
         private const val CONNECTION_TEST_TIMEOUT_MS = 25_000L
         private const val MAX_WORK_ATTEMPTS = 3
+        private const val MAX_AUTO_ATTEMPTS_PER_CHAPTER = 3
         private const val PREVIOUS_CONTEXT_LIMIT = 3
         private val RETRYABLE_HTTP_CODES = setOf(408, 425, 429, 500, 502, 503, 504)
     }

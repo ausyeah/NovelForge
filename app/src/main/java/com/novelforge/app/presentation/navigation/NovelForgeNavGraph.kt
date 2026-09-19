@@ -4,6 +4,7 @@ import android.net.Uri
 import android.content.Intent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
@@ -27,10 +28,31 @@ import com.novelforge.app.presentation.project.CreateProjectScreen
 import com.novelforge.app.presentation.project.CreativeSetupScreen
 import com.novelforge.app.presentation.project.CreativeSetupViewModel
 import com.novelforge.app.presentation.project.isCreativeSetupComplete
+import com.novelforge.app.presentation.projects.ProjectsScreen
 import com.novelforge.app.presentation.settings.SettingsScreen
+import com.novelforge.app.domain.model.Project
 import com.novelforge.app.infrastructure.export.ExportChapter
 import com.novelforge.app.infrastructure.export.TxtExporter
 import com.novelforge.app.infrastructure.llm.OpenAiCompatibleClient
+import com.novelforge.app.domain.model.ChapterRevision
+import com.novelforge.app.domain.model.OutlineItem
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+// 导出前把大纲与最新修订拼成章节列表；超长篇下这是 O(N) 大对象操作，放在 IO 线程执行
+private fun buildExportChapters(
+    chapters: List<OutlineItem>,
+    revisions: List<ChapterRevision>
+): List<ExportChapter> {
+    val latestByItem = revisions.groupBy { it.outlineItemId }
+        .mapValues { (_, values) -> values.maxBy { it.revision } }
+    return chapters.mapNotNull { item ->
+        latestByItem[item.id]?.let { revision ->
+            ExportChapter(item.orderIndex, item.title, revision.content)
+        }
+    }
+}
 
 @Composable
 fun NovelForgeApp(application: NovelForgeApplication) {
@@ -40,28 +62,37 @@ fun NovelForgeApp(application: NovelForgeApplication) {
     )
     val projects by homeViewModel.projects.collectAsStateWithLifecycle()
     val homeOperationError by homeViewModel.operationError.collectAsStateWithLifecycle()
+    val openProject: (Project) -> Unit = { project ->
+        val destination = if (isCreativeSetupComplete(project)) {
+            "outline/${project.id}"
+        } else {
+            "creative-setup/${project.id}"
+        }
+        navController.navigate(destination)
+    }
 
     NavHost(navController = navController, startDestination = "home") {
         composable("home") {
             HomeScreen(
-                projects = projects,
+                projectCount = projects.size,
                 onCreateProject = { navController.navigate("create") },
+                onOpenProjects = { navController.navigate("projects") },
                 onOpenSettings = { navController.navigate("settings") },
                 onOpenExports = { navController.navigate("exports") },
                 onOpenLibrary = { navController.navigate("library") },
-                onOpenChat = { navController.navigate("chat") },
-                onOpenProject = { project ->
-                    val destination = if (isCreativeSetupComplete(project)) {
-                        "outline/${project.id}"
-                    } else {
-                        "creative-setup/${project.id}"
-                    }
-                    navController.navigate(destination)
-                },
+                onOpenChat = { navController.navigate("chat") }
+            )
+        }
+        composable("projects") {
+            ProjectsScreen(
+                projects = projects,
                 operationError = homeOperationError,
+                onOpenProject = openProject,
                 onRenameProject = homeViewModel::renameProject,
                 onDeleteProject = homeViewModel::deleteProject,
-                onClearOperationError = homeViewModel::clearOperationError
+                onClearOperationError = homeViewModel::clearOperationError,
+                onCreateProject = { navController.navigate("create") },
+                onBack = { navController.popBackStack() }
             )
         }
         composable("exports") {
@@ -72,7 +103,8 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                 factory = ChatViewModel.Factory(
                     settingsStore = application.appSettingsStore,
                     apiKeyStore = application.apiKeyStore,
-                    client = OpenAiCompatibleClient()
+                    client = OpenAiCompatibleClient(),
+                    historyStore = application.chatHistoryStore
                 )
             )
             ChatScreen(viewModel = chatViewModel, onBack = { navController.popBackStack() })
@@ -84,7 +116,7 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                     outlineRepository = application.outlineRepository,
                     chapterRepository = application.chapterRepository,
                     generationArtifactRepository = application.generationArtifactRepository,
-                    readingPositionStore = com.novelforge.app.data.settings.ReadingPositionStore(application)
+                    readingPositionStore = application.readingPositionStore
                 )
             )
             LibraryScreen(viewModel = libraryViewModel, onBack = { navController.popBackStack() })
@@ -178,6 +210,8 @@ fun NovelForgeApp(application: NovelForgeApplication) {
             val autoRun by viewModel.autoRun.collectAsStateWithLifecycle()
             val chapterJob by viewModel.chapterJob.collectAsStateWithLifecycle()
             val writtenChapterIds by viewModel.writtenChapterIds.collectAsStateWithLifecycle()
+            val optimizingIndex by viewModel.optimizingIndex.collectAsStateWithLifecycle()
+            val wandResult by viewModel.wandResult.collectAsStateWithLifecycle()
             androidx.compose.runtime.LaunchedEffect(autostart, projectId) {
                 if (autostart) viewModel.startAutoRun()
             }
@@ -201,7 +235,12 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                     navController.navigate("chapter/$projectId/${Uri.encode(item.id)}")
                 },
                 onClearError = viewModel::clearError,
-                onBack = { navController.popBackStack() }
+                optimizingIndex = optimizingIndex,
+                wandResult = wandResult,
+                onOptimize = viewModel::optimizeChapter,
+                onStopOptimize = viewModel::stopOptimize,
+                onConsumeWand = viewModel::consumeWandResult,
+                onRegenerateFrom = viewModel::regenerateFrom
             )
         }
         composable(
@@ -237,6 +276,7 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                 ?.sortedBy { it.orderIndex }
                 ?.firstOrNull { it.orderIndex == (chapter?.orderIndex ?: -1) + 1 }
             val hasRevision = revisions.any { it.outlineItemId == outlineItemId }
+            val exportScope = rememberCoroutineScope()
             androidx.compose.runtime.LaunchedEffect(autostart, chapter?.id, job?.id, hasRevision) {
                 if (autostart && chapter != null && job == null && !hasRevision) {
                     viewModel.generate(chapter)
@@ -261,22 +301,24 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                 },
                 onBackHome = { navController.popBackStack("home", false) },
                 onExport = {
-                    val latestByItem = revisions.groupBy { it.outlineItemId }
-                        .mapValues { (_, values) -> values.maxBy { it.revision } }
-                    val chapters = outlines.firstOrNull()?.chapters.orEmpty().mapNotNull { item ->
-                        latestByItem[item.id]?.let { revision ->
-                            ExportChapter(item.orderIndex, item.title, revision.content)
+                    val outlineChapters = outlines.firstOrNull()?.chapters.orEmpty()
+                    val revisionList = revisions
+                    exportScope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching {
+                                val chapters = buildExportChapters(outlineChapters, revisionList)
+                                if (chapters.isEmpty()) null
+                                else TxtExporter().saveToPublicDownloads(application, title, chapters)
+                            }
                         }
-                    }
-                    if (chapters.isNotEmpty()) {
-                        runCatching {
-                            TxtExporter().saveToPublicDownloads(application, title, chapters)
-                        }.onSuccess { saved ->
-                            android.widget.Toast.makeText(
-                                application,
-                                "已保存到 ${saved.location}/${saved.displayName}",
-                                android.widget.Toast.LENGTH_LONG
-                            ).show()
+                        result.onSuccess { saved ->
+                            if (saved != null) {
+                                android.widget.Toast.makeText(
+                                    application,
+                                    "已保存到 ${saved.location}/${saved.displayName}",
+                                    android.widget.Toast.LENGTH_LONG
+                                ).show()
+                            }
                         }.onFailure { error ->
                             android.widget.Toast.makeText(
                                 application,
@@ -287,25 +329,26 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                     }
                 },
                 onShare = {
-                    val latestByItem = revisions.groupBy { it.outlineItemId }
-                        .mapValues { (_, values) -> values.maxBy { it.revision } }
-                    val chapters = outlines.firstOrNull()?.chapters.orEmpty().mapNotNull { item ->
-                        latestByItem[item.id]?.let { revision ->
-                            ExportChapter(item.orderIndex, item.title, revision.content)
+                    val outlineChapters = outlines.firstOrNull()?.chapters.orEmpty()
+                    val revisionList = revisions
+                    exportScope.launch {
+                        val file = withContext(Dispatchers.IO) {
+                            val chapters = buildExportChapters(outlineChapters, revisionList)
+                            if (chapters.isEmpty()) null
+                            else TxtExporter().writeToCache(application, title, chapters)
                         }
-                    }
-                    if (chapters.isNotEmpty()) {
-                        val file = TxtExporter().writeToCache(application, title, chapters)
-                        val send = Intent(Intent.ACTION_SEND).apply {
-                            type = "text/plain"
-                            putExtra(Intent.EXTRA_STREAM, TxtExporter().shareUri(application, file))
-                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        if (file != null) {
+                            val send = Intent(Intent.ACTION_SEND).apply {
+                                type = "text/plain"
+                                putExtra(Intent.EXTRA_STREAM, TxtExporter().shareUri(application, file))
+                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            application.startActivity(
+                                Intent.createChooser(send, "分享小说 TXT")
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
                         }
-                        application.startActivity(
-                            Intent.createChooser(send, "分享小说 TXT")
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
                     }
                 },
                 onClearError = viewModel::clearError,

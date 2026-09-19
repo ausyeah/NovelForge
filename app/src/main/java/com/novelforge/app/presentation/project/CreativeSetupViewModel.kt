@@ -5,6 +5,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.novelforge.app.domain.model.CreativeConfig
 import com.novelforge.app.domain.model.FlowState
+import com.novelforge.app.domain.model.MAX_CHAPTER_COUNT
+import com.novelforge.app.domain.model.MIN_CHAPTER_COUNT
 import com.novelforge.app.domain.model.Project
 import com.novelforge.app.domain.model.ProjectStatus
 import com.novelforge.app.domain.model.QuestData
@@ -43,8 +45,8 @@ internal fun validateCreativeSetup(config: CreativeConfig, questData: QuestData)
     ) {
         return "请填写自定义爽感频率"
     }
-    if (config.chapterCount !in 1..200) {
-        return "章节数量必须在 1 到 200 之间"
+    if (config.chapterCount !in MIN_CHAPTER_COUNT..MAX_CHAPTER_COUNT) {
+        return "章节数量必须在 $MIN_CHAPTER_COUNT 到 $MAX_CHAPTER_COUNT 之间"
     }
     if (config.targetLength !in MIN_TARGET_LENGTH..MAX_TARGET_LENGTH) {
         return "每章目标字数必须在 500 到 10000 之间"

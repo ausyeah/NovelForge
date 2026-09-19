@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -64,6 +65,23 @@ fun SettingsScreen(
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        Text("外观")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("system" to "跟随系统", "light" to "浅色", "dark" to "深色").forEach { (value, label) ->
+                FilterChip(
+                    selected = settings.themeMode == value,
+                    onClick = {
+                        settings = settings.copy(themeMode = value)
+                        saved = false
+                        // 主题即时生效，不等你点保存
+                        scope.launch {
+                            settingsStore.update { current -> current.copy(themeMode = value) }
+                        }
+                    },
+                    label = { Text(label) }
+                )
+            }
+        }
         Text("模型设置")
         OutlinedTextField(
             value = settings.providerName,

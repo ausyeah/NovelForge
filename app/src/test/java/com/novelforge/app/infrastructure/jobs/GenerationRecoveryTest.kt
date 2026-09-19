@@ -166,6 +166,24 @@ class GenerationRecoveryTest {
                     it.targetId == targetId
             }
 
+        override suspend fun findJobsWithStatuses(statuses: Collection<String>): List<GenerationJob> =
+            jobs.values.filter { it.status.name in statuses }
+
+        override suspend fun deleteJobsForTargets(
+            projectId: String,
+            purpose: String,
+            targetIds: Collection<String>
+        ) {
+            val doomed = jobs.keys.filter { key ->
+                val job = jobs[key] ?: return@filter false
+                job.projectId == projectId && job.purpose.name == purpose && job.targetId in targetIds
+            }
+            doomed.forEach { key ->
+                jobs.remove(key)
+                states[key]?.value = null
+            }
+        }
+
         override suspend fun findById(id: String): GenerationJob? = jobs[id]
 
         override suspend fun findByClientRequestId(clientRequestId: String): GenerationJob? =

@@ -11,6 +11,15 @@ enum class ProjectStatus {
     ARCHIVED
 }
 
+/** UI 展示用中文名；枚举名只留给存储层 */
+fun ProjectStatus.label(): String = when (this) {
+    ProjectStatus.DRAFT -> "筹备中"
+    ProjectStatus.OUTLINING -> "搭建大纲中"
+    ProjectStatus.WRITING -> "连载中"
+    ProjectStatus.COMPLETED -> "已完结"
+    ProjectStatus.ARCHIVED -> "已归档"
+}
+
 @Serializable
 data class Project(
     val id: String,

@@ -9,6 +9,7 @@ import android.provider.MediaStore
 import androidx.core.content.FileProvider
 import java.io.File
 import java.io.IOException
+import java.io.OutputStream
 
 data class ExportChapter(
     val orderIndex: Int,
@@ -24,14 +25,20 @@ data class SavedTxt(
 )
 
 class TxtExporter {
-    fun render(title: String, chapters: List<ExportChapter>): String = buildString {
-        appendLine(title)
-        appendLine()
-        chapters.sortedBy { it.orderIndex }.forEach { chapter ->
-            appendLine("第${chapter.orderIndex + 1}章 ${chapter.title}")
-            appendLine()
-            appendLine(chapter.content)
-            appendLine()
+    /**
+     * 逐章流式写入：超长篇（1000+ 章、数 MB 正文）不把全文拼成单个 String，
+     * 避免瞬时堆峰值导致 OOM。调用方需保证运行在 IO 线程。
+     */
+    fun writeTo(stream: OutputStream, title: String, chapters: List<ExportChapter>) {
+        stream.bufferedWriter(Charsets.UTF_8).use { writer ->
+            writer.appendLine(title)
+            writer.appendLine()
+            chapters.sortedBy { it.orderIndex }.forEach { chapter ->
+                writer.appendLine("第${chapter.orderIndex + 1}章 ${chapter.title}")
+                writer.appendLine()
+                writer.appendLine(chapter.content)
+                writer.appendLine()
+            }
         }
     }
 
@@ -45,7 +52,6 @@ class TxtExporter {
      */
     fun saveToPublicDownloads(context: Context, title: String, chapters: List<ExportChapter>): SavedTxt {
         val name = safeFileName(title)
-        val text = render(title, chapters)
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val relativePath = Environment.DIRECTORY_DOWNLOADS + "/NovelForge"
             val values = ContentValues().apply {
@@ -58,14 +64,13 @@ class TxtExporter {
                 values
             ) ?: throw IOException("无法写入下载目录")
             context.contentResolver.openOutputStream(uri)?.use { stream ->
-                stream.write(text.toByteArray(Charsets.UTF_8))
+                writeTo(stream, title, chapters)
             } ?: throw IOException("无法写入下载目录")
             SavedTxt("$name.txt", "下载/NovelForge", uri)
         } else {
             val dir = File(context.getExternalFilesDir(null), "NovelForge").apply { mkdirs() }
-            val file = File(dir, "$name.txt").apply {
-                writeText(text, Charsets.UTF_8)
-            }
+            val file = File(dir, "$name.txt")
+            file.outputStream().use { writeTo(it, title, chapters) }
             SavedTxt(file.name, "应用导出目录/NovelForge", fileUri(context, file))
         }
     }
@@ -76,7 +81,7 @@ class TxtExporter {
     fun writeToCache(context: Context, title: String, chapters: List<ExportChapter>): File {
         val directory = File(context.cacheDir, "exports").apply { mkdirs() }
         return File(directory, "${safeFileName(title)}.txt").apply {
-            writeText(render(title, chapters), Charsets.UTF_8)
+            outputStream().use { writeTo(it, title, chapters) }
         }
     }
 

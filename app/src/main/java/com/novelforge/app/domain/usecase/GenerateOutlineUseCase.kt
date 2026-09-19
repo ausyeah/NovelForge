@@ -3,6 +3,8 @@ package com.novelforge.app.domain.usecase
 import com.novelforge.app.domain.model.GenerationJob
 import com.novelforge.app.domain.model.GenerationJobStatus
 import com.novelforge.app.domain.model.GenerationPurpose
+import com.novelforge.app.domain.model.MAX_CHAPTER_COUNT
+import com.novelforge.app.domain.model.MIN_CHAPTER_COUNT
 import com.novelforge.app.domain.model.OutlineItem
 import com.novelforge.app.domain.model.Project
 import com.novelforge.app.domain.model.tonePromptLabel
@@ -124,7 +126,7 @@ class GenerateOutlineUseCase(
         previousChapters: List<OutlineItem>
     ): ChatRequest {
         val creativeConfig = checkNotNull(project.creativeConfig) { "请先完成创作设置" }
-        val chapterCount = creativeConfig.chapterCount.coerceIn(1, 200)
+        val chapterCount = creativeConfig.chapterCount.coerceIn(MIN_CHAPTER_COUNT, MAX_CHAPTER_COUNT)
         // 分批生成：每次请求一批连续推进段，避免要求模型一次输出几百章
         val batchStart = chapterNumber.coerceIn(1, chapterCount)
         val batchEnd = minOf(batchStart + OUTLINE_BATCH_SIZE - 1, chapterCount)

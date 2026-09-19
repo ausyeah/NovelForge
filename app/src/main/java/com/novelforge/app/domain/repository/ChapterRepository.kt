@@ -7,4 +7,5 @@ interface ChapterRepository {
     fun observeRevisions(projectId: String): Flow<List<ChapterRevision>>
     suspend fun latest(projectId: String, outlineItemId: String): ChapterRevision?
     suspend fun save(revision: ChapterRevision)
+    suspend fun deleteRevisionsForItems(projectId: String, outlineItemIds: Collection<String>)
 }

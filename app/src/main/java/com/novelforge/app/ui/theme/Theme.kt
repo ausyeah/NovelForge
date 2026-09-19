@@ -2,7 +2,7 @@ package com.novelforge.app.ui.theme
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
@@ -61,7 +61,7 @@ fun NovelForgeTheme(
             Box(
                 modifier = Modifier
                     .fillMaxSize()
-                    .safeDrawingPadding(),
+                    .systemBarsPadding(),
             ) {
                 content()
             }

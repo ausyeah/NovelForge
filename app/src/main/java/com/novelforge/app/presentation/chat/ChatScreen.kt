@@ -59,7 +59,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 
+@kotlinx.serialization.Serializable
 data class UiChatMessage(
     val role: ChatRole,
     val text: String,
@@ -314,26 +316,33 @@ fun ChatScreen(
                         }
                     } else {
                         Surface(
-                            modifier = Modifier.fillMaxWidth(0.9f),
+                            modifier = Modifier.fillMaxWidth(0.88f),
                             shape = RoundedCornerShape(6.dp, 20.dp, 20.dp, 20.dp),
                             color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
                         ) {
-                            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
+                            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                                var reasoningOpen by remember(message.reasoning) {
+                                    mutableStateOf(message.streaming)
+                                }
                                 if (message.reasoning.isNotBlank()) {
                                     Text(
-                                        if (message.streaming) "思考中…" else "思考过程",
+                                        if (message.streaming) "思考中…" else "已完成思考 · 点击展开/收起",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.primary,
                                         fontWeight = FontWeight.Bold,
-                                        modifier = Modifier.padding(bottom = 4.dp)
+                                        modifier = Modifier
+                                            .padding(bottom = 4.dp)
+                                            .clickable { reasoningOpen = !reasoningOpen }
                                     )
-                                    Text(
-                                        message.reasoning,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                                        lineHeight = 18.sp,
-                                        modifier = Modifier.padding(bottom = 6.dp)
-                                    )
+                                    if (reasoningOpen) {
+                                        Text(
+                                            message.reasoning,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                            lineHeight = 18.sp,
+                                            modifier = Modifier.padding(bottom = 8.dp)
+                                        )
+                                    }
                                 }
                                 if (message.text.isNotEmpty()) {
                                     Text(

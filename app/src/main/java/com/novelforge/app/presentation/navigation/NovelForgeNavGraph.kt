@@ -13,6 +13,8 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.novelforge.app.NovelForgeApplication
 import com.novelforge.app.presentation.chapter.ChapterScreen
+import com.novelforge.app.presentation.chat.ChatScreen
+import com.novelforge.app.presentation.chat.ChatViewModel
 import com.novelforge.app.presentation.chapter.ChapterViewModel
 import com.novelforge.app.presentation.exports.ExportsScreen
 import com.novelforge.app.presentation.home.HomeScreen
@@ -28,6 +30,7 @@ import com.novelforge.app.presentation.project.isCreativeSetupComplete
 import com.novelforge.app.presentation.settings.SettingsScreen
 import com.novelforge.app.infrastructure.export.ExportChapter
 import com.novelforge.app.infrastructure.export.TxtExporter
+import com.novelforge.app.infrastructure.llm.OpenAiCompatibleClient
 
 @Composable
 fun NovelForgeApp(application: NovelForgeApplication) {
@@ -46,6 +49,7 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                 onOpenSettings = { navController.navigate("settings") },
                 onOpenExports = { navController.navigate("exports") },
                 onOpenLibrary = { navController.navigate("library") },
+                onOpenChat = { navController.navigate("chat") },
                 onOpenProject = { project ->
                     val destination = if (isCreativeSetupComplete(project)) {
                         "outline/${project.id}"
@@ -62,6 +66,16 @@ fun NovelForgeApp(application: NovelForgeApplication) {
         }
         composable("exports") {
             ExportsScreen(onBack = { navController.popBackStack() })
+        }
+        composable("chat") {
+            val chatViewModel: ChatViewModel = viewModel(
+                factory = ChatViewModel.Factory(
+                    settingsStore = application.appSettingsStore,
+                    apiKeyStore = application.apiKeyStore,
+                    client = OpenAiCompatibleClient()
+                )
+            )
+            ChatScreen(viewModel = chatViewModel, onBack = { navController.popBackStack() })
         }
         composable("library") {
             val libraryViewModel: LibraryViewModel = viewModel(

@@ -25,6 +25,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.novelforge.app.domain.model.Project
+import com.novelforge.app.ui.theme.GlassButton
 
 private enum class ProjectDialog {
     MENU,
@@ -41,6 +42,7 @@ fun HomeScreen(
     onOpenSettings: () -> Unit,
     onOpenExports: () -> Unit,
     onOpenLibrary: () -> Unit,
+    onOpenChat: () -> Unit,
     operationError: String?,
     onRenameProject: (String, String, () -> Unit) -> Unit,
     onDeleteProject: (String, () -> Unit) -> Unit,
@@ -68,18 +70,11 @@ fun HomeScreen(
             text = "把一个想法，慢慢写成一部小说。",
             modifier = Modifier.padding(top = 12.dp, bottom = 16.dp)
         )
-        Button(onClick = onCreateProject, modifier = Modifier.fillMaxWidth()) {
-            Text("新建项目")
-        }
-        Button(onClick = onOpenSettings, modifier = Modifier.fillMaxWidth()) {
-            Text("模型设置")
-        }
-        Button(onClick = onOpenExports, modifier = Modifier.fillMaxWidth()) {
-            Text("导出文件")
-        }
-        Button(onClick = onOpenLibrary, modifier = Modifier.fillMaxWidth()) {
-            Text("我的书架")
-        }
+        GlassButton("新建项目", onCreateProject, modifier = Modifier.fillMaxWidth(), accent = true)
+        GlassButton("模型设置", onOpenSettings, modifier = Modifier.fillMaxWidth())
+        GlassButton("导出文件", onOpenExports, modifier = Modifier.fillMaxWidth())
+        GlassButton("我的书架", onOpenLibrary, modifier = Modifier.fillMaxWidth())
+        GlassButton("AI 助手", onOpenChat, modifier = Modifier.fillMaxWidth())
         if (projects.isNotEmpty()) {
             Text(
                 "我的项目",

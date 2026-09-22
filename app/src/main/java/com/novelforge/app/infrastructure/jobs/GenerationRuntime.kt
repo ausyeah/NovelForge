@@ -45,8 +45,10 @@ import com.novelforge.app.infrastructure.llm.LLMConnectionConfig
 import com.novelforge.app.infrastructure.llm.JsonResponseValidator
 import com.novelforge.app.infrastructure.llm.OutlineEnvelope
 import com.novelforge.app.infrastructure.llm.MemorySelector
+import com.novelforge.app.infrastructure.llm.chapterMemoryHint
 import com.novelforge.app.infrastructure.llm.OpenAiCompatibleClient
 import com.novelforge.app.infrastructure.llm.parseMemoryNotes
+import com.novelforge.app.infrastructure.llm.preserveOutlineIndexes
 import com.novelforge.app.infrastructure.llm.ProviderCapabilities
 import com.novelforge.app.infrastructure.llm.StreamEvent
 import com.novelforge.app.infrastructure.llm.stripInlineReasoning
@@ -262,7 +264,12 @@ class GenerationRuntime(
                 ?.let { previousChapter -> chapterRepository.latest(projectId, previousChapter.id) }
             val memory = MemorySelector.select(
                 project.continuityState,
-                inputBudget = project.creativeConfig?.inputBudget ?: 8_000
+                inputBudget = project.creativeConfig?.inputBudget ?: 8_000,
+                chapterHint = chapterMemoryHint(
+                    nextChapter.title,
+                    nextChapter.summary,
+                    nextChapter.characterChanges
+                )
             )
             val context = ChapterContext(
                 continuityState = memory.continuity,
@@ -1138,16 +1145,9 @@ class GenerationRuntime(
                 val project = projectRepository.getProject(job.projectId)
                     ?: return ArtifactPersistResult(saved = false, reason = "项目不存在")
                 val previous = outlineRepository.latest(job.projectId)
-                // 保留 checkpoint 里的 orderIndex（删章留洞是故意的）：重排会让
-                // "chapter-N" id 与展示序号脱节，续批起跑点也会算错；仅在异常时兜底重排
-                val preserved = parsed.value.mapIndexed { index, item ->
-                    if (item.orderIndex in 0 until parsed.value.size) item else item.copy(orderIndex = index)
-                }
-                val chapters = if (preserved.map { it.orderIndex }.distinct().size == preserved.size) {
-                    preserved.sortedBy { it.orderIndex }
-                } else {
-                    parsed.value.mapIndexed { index, item -> item.copy(orderIndex = index) }
-                }
+                // parseOutline 已保留删章留洞的 orderIndex。这里再压成 0..N-1 会让
+                // chapter-N 与既有章节撞号。序号重复时才兜底重排。
+                val chapters = preserveOutlineIndexes(parsed.value)
                 val version = OutlineVersion(
                     id = UUID.randomUUID().toString(),
                     projectId = job.projectId,

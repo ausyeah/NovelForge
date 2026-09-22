@@ -19,7 +19,13 @@ import com.novelforge.app.data.repository.RoomOutlineRepository
 import com.novelforge.app.data.repository.RoomPromptSnapshotRepository
 import com.novelforge.app.data.repository.RoomProjectRepository
 import com.novelforge.app.data.security.KeystoreApiKeyStore
+import com.novelforge.app.agent.LlmAgentModel
+import com.novelforge.app.agent.NovelToolRegistry
+import com.novelforge.app.agent.RoomNovelBookStore
+import com.novelforge.app.data.agent.AgentTraceStore
 import com.novelforge.app.data.settings.AppSettingsStore
+import com.novelforge.app.data.settings.ModelPresetStore
+import com.novelforge.app.ui.theme.WallpaperStore
 import com.novelforge.app.infrastructure.jobs.GenerationRuntime
 import com.novelforge.app.infrastructure.jobs.GenerationWorkerDependencies
 import com.novelforge.app.infrastructure.jobs.GenerationWorkerDependenciesProvider
@@ -48,6 +54,23 @@ class NovelForgeApplication : Application(), GenerationWorkerDependenciesProvide
     val llmCallRepository by lazy { RoomLlmCallRepository(database.llmCallDao()) }
     val apiKeyStore by lazy { KeystoreApiKeyStore(this) }
     val appSettingsStore by lazy { AppSettingsStore(this) }
+    val modelPresetStore by lazy { ModelPresetStore(this, apiKeyStore) }
+    val agentTraceStore by lazy { AgentTraceStore(this) }
+    val novelToolRegistry by lazy {
+        NovelToolRegistry(
+            RoomNovelBookStore(
+                projectRepository = projectRepository,
+                outlineRepository = outlineRepository,
+                chapterRepository = chapterRepository,
+                artifacts = generationArtifactRepository,
+                enqueue = { projectId, chapter, context ->
+                    generationRuntime.queueChapter(projectId, chapter, context).id
+                }
+            )
+        )
+    }
+    val agentModel by lazy { LlmAgentModel(appSettingsStore, apiKeyStore) }
+    val wallpaperStore by lazy { WallpaperStore(this) }
     val chatHistoryStore by lazy { com.novelforge.app.data.chat.ChatHistoryStore(this) }
     // 必须全局单例：PreferenceDataStoreFactory 每次 create 都会注册一个新 DataStore，
     // 同一文件多个实例并存会直接抛 IllegalStateException（点开书架即闪退的根因）
@@ -103,6 +126,7 @@ class NovelForgeApplication : Application(), GenerationWorkerDependenciesProvide
             )
         )
         // 进程被杀后残留的 QUEUED/RUNNING 僵尸任务会把一键全自动卡死，启动即清扫
+        appScope.launch { runCatching { wallpaperStore.loadSaved() } }
         appScope.launch {
             kotlinx.coroutines.delay(1_500)
             runCatching { generationRuntime.sweepZombieJobs() }

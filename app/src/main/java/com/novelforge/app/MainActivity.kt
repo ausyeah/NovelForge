@@ -12,8 +12,6 @@ import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.novelforge.app.presentation.navigation.NovelForgeApp
 import com.novelforge.app.ui.theme.NovelForgeTheme
-import com.novelforge.app.ui.theme.rememberWallpaper
-import com.novelforge.app.ui.theme.wallpaperFile
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -28,10 +26,7 @@ class MainActivity : ComponentActivity() {
                 "dark" -> true
                 else -> systemDark
             }
-            val wallpaperName = settings?.wallpaperFileName.orEmpty()
-            val wallpaper = rememberWallpaper(
-                if (wallpaperName.isBlank()) null else wallpaperFile(app)
-            )
+            val wallpaper by app.wallpaperStore.current.collectAsStateWithLifecycle()
             NovelForgeTheme(
                 darkTheme = dark,
                 wallpaper = wallpaper,

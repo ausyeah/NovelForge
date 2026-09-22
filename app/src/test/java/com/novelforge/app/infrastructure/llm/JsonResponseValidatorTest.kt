@@ -18,6 +18,21 @@ class JsonResponseValidatorTest {
     }
 
     @Test
+    fun outline_keepsDeletionHolesInsteadOfRenumbering() {
+        val result = validator.parseOutline(
+            """[
+                {"id":"chapter-0","orderIndex":0,"title":"引子","summary":"a"},
+                {"id":"chapter-1","orderIndex":1,"title":"一","summary":"b"},
+                {"id":"chapter-4","orderIndex":4,"title":"四","summary":"c"}
+            ]"""
+        )
+
+        val items = (result as JsonValidationResult.Success).value
+        assertEquals(listOf(0, 1, 4), items.map { it.orderIndex })
+        assertEquals(listOf("chapter-0", "chapter-1", "chapter-4"), items.map { it.id })
+    }
+
+    @Test
     fun outline_rejectsDuplicateIds() {
         val result = validator.parseOutline(
             "[{\"id\":\"same\",\"orderIndex\":0,\"title\":\"一\",\"summary\":\"a\"}," +

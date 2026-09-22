@@ -102,7 +102,7 @@ class JsonResponseValidator(
                 }
                 item.copy(id = candidateId)
             }
-            JsonValidationResult.Success(normalizedItems, normalized)
+            JsonValidationResult.Success(preserveOutlineIndexes(normalizedItems), normalized)
         } catch (error: Exception) {
             JsonValidationResult.Failure("大纲 JSON 无法解析：${error.message.orEmpty()}")
         }
@@ -238,4 +238,19 @@ fun stripInlineReasoning(raw: String): String {
         cursor = end + "</think>".length
     }
     return builder.toString().trim()
+}
+
+/**
+ * 删章留洞的序号可以大于列表长度，只要互不重复就保留。
+ * 旧逻辑把「大于等于章节数」的序号当成非法再压成 0..N-1，续写时会和 chapter-N 撞号。
+ */
+fun preserveOutlineIndexes(items: List<com.novelforge.app.domain.model.OutlineItem>): List<com.novelforge.app.domain.model.OutlineItem> {
+    val preserved = items.mapIndexed { index, item ->
+        if (item.orderIndex >= 0) item else item.copy(orderIndex = index)
+    }
+    return if (preserved.map { it.orderIndex }.distinct().size == preserved.size) {
+        preserved.sortedBy { it.orderIndex }
+    } else {
+        items.mapIndexed { index, item -> item.copy(orderIndex = index) }
+    }
 }

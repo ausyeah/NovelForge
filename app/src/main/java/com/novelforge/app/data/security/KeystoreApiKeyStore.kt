@@ -71,6 +71,24 @@ class KeystoreApiKeyStore(
         }
     }
 
+    /** 加密一段文本，不改当前正在使用的 API Key。 */
+    fun seal(plain: String): String {
+        val cipher = Cipher.getInstance(GCM_TRANSFORMATION)
+        cipher.init(
+            Cipher.ENCRYPT_MODE,
+            getOrCreateAesKey(gcmAlias(), KeyProperties.BLOCK_MODE_GCM, KeyProperties.ENCRYPTION_PADDING_NONE)
+        )
+        return encode(cipher.iv) + "." + encode(cipher.doFinal(plain.toByteArray(StandardCharsets.UTF_8)))
+    }
+
+    fun open(sealed: String): String {
+        val parts = sealed.split('.', limit = 2)
+        if (parts.size != 2) throw SecureStorageException("预设密钥格式损坏")
+        val iv = android.util.Base64.decode(parts[0], android.util.Base64.NO_WRAP)
+        val ciphertext = android.util.Base64.decode(parts[1], android.util.Base64.NO_WRAP)
+        return decryptGcm(ciphertext, iv)
+    }
+
     override suspend fun clear() {
         clearStoredData()
         deleteKey(gcmAlias())

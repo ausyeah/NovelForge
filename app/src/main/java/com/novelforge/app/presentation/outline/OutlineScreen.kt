@@ -43,6 +43,8 @@ import com.novelforge.app.domain.model.GenerationJob
 import com.novelforge.app.domain.model.GenerationJobStatus
 import com.novelforge.app.domain.model.OutlineItem
 import com.novelforge.app.domain.model.OutlineVersion
+import com.novelforge.app.agent.AgentStep
+import com.novelforge.app.presentation.agent.AgentAssistCard
 import com.novelforge.app.presentation.common.GenerationStatusCard
 import com.novelforge.app.presentation.common.PaperTopBar
 import com.novelforge.app.presentation.common.chapterLabel
@@ -80,7 +82,12 @@ fun OutlineScreen(
     onConsumeWand: () -> Unit = {},
     onRegenerateFrom: (OutlineItem) -> Unit = {},
     plannedChapterCount: Int? = null,
-    onOpenMemory: () -> Unit = {}
+    onOpenMemory: () -> Unit = {},
+    agentSteps: List<AgentStep> = emptyList(),
+    agentBusy: Boolean = false,
+    agentError: String? = null,
+    onAskAgent: (String) -> Unit = {},
+    onContinueAgent: () -> Unit = {}
 ) {
     // 进度计数不做全量 JSON 解析：checkpoint 每 2 秒触发一次，335 章 blob 解析会卡主线程
     val savedChapterCount = remember(job?.partialContent) {
@@ -244,6 +251,13 @@ fun OutlineScreen(
         )
 
         if (!detailOpen) {
+            AgentAssistCard(
+                steps = agentSteps,
+                busy = agentBusy,
+                error = agentError,
+                onAsk = onAskAgent,
+                onContinue = onContinueAgent
+            )
             overviewButtons()
         }
         if (error != null) {

@@ -34,7 +34,11 @@ class TxtExporter {
             writer.appendLine(title)
             writer.appendLine()
             chapters.sortedBy { it.orderIndex }.forEach { chapter ->
-                writer.appendLine("${com.novelforge.app.presentation.common.chapterLabel(chapter.orderIndex)} ${chapter.title}")
+                val heading = listOf(
+                    com.novelforge.app.presentation.common.chapterLabel(chapter.orderIndex),
+                    com.novelforge.app.presentation.common.cleanChapterTitle(chapter.title)
+                ).filter { it.isNotBlank() }.joinToString(" ")
+                writer.appendLine(heading)
                 writer.appendLine()
                 writer.appendLine(chapter.content)
                 writer.appendLine()

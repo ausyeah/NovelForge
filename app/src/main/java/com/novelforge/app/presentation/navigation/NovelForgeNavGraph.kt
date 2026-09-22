@@ -31,10 +31,12 @@ import com.novelforge.app.presentation.project.CreativeSetupScreen
 import com.novelforge.app.presentation.project.CreativeSetupViewModel
 import com.novelforge.app.presentation.project.isCreativeSetupComplete
 import com.novelforge.app.presentation.projects.ProjectsScreen
+import com.novelforge.app.presentation.agent.AgentAssistViewModel
 import com.novelforge.app.presentation.settings.SettingsScreen
 import com.novelforge.app.presentation.story.StoryBibleScreen
 import com.novelforge.app.presentation.story.StoryBibleViewModel
 import com.novelforge.app.infrastructure.llm.MemorySelector
+import com.novelforge.app.infrastructure.llm.chapterMemoryHint
 import com.novelforge.app.domain.model.Project
 import com.novelforge.app.infrastructure.export.ExportChapter
 import com.novelforge.app.infrastructure.export.TxtExporter
@@ -194,6 +196,8 @@ fun NovelForgeApp(application: NovelForgeApplication) {
         composable("settings") {
             SettingsScreen(
                 settingsStore = application.appSettingsStore,
+                presetStore = application.modelPresetStore,
+                wallpaperStore = application.wallpaperStore,
                 apiKeyStore = application.apiKeyStore,
                 onTestConnection = { application.generationRuntime.testConnection() },
                 onFetchModels = { runCatching { application.generationRuntime.fetchModels() } },
@@ -230,6 +234,18 @@ fun NovelForgeApp(application: NovelForgeApplication) {
             val writtenChapterIds by viewModel.writtenChapterIds.collectAsStateWithLifecycle()
             val optimizingIndex by viewModel.optimizingIndex.collectAsStateWithLifecycle()
             val wandResult by viewModel.wandResult.collectAsStateWithLifecycle()
+            val agentViewModel: AgentAssistViewModel = viewModel(
+                key = "agent-$projectId",
+                factory = AgentAssistViewModel.Factory(
+                    projectId = projectId,
+                    registry = application.novelToolRegistry,
+                    model = application.agentModel,
+                    traceStore = application.agentTraceStore
+                )
+            )
+            val agentSteps by agentViewModel.steps.collectAsStateWithLifecycle()
+            val agentBusy by agentViewModel.busy.collectAsStateWithLifecycle()
+            val agentError by agentViewModel.error.collectAsStateWithLifecycle()
             androidx.compose.runtime.LaunchedEffect(autostart, projectId) {
                 // 进大纲页顺手收一次僵尸任务（幂等、廉价查询），长时间驻留的进程也能自愈
                 runCatching { application.generationRuntime.sweepZombieJobs() }
@@ -261,7 +277,12 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                 onStopOptimize = viewModel::stopOptimize,
                 onConsumeWand = viewModel::consumeWandResult,
                 onRegenerateFrom = viewModel::regenerateFrom,
-                onOpenMemory = { navController.navigate("memory/$projectId") }
+                onOpenMemory = { navController.navigate("memory/$projectId") },
+                agentSteps = agentSteps,
+                agentBusy = agentBusy,
+                agentError = agentError,
+                onAskAgent = agentViewModel::ask,
+                onContinueAgent = agentViewModel::continueRun
             )
         }
         composable(
@@ -309,15 +330,18 @@ fun NovelForgeApp(application: NovelForgeApplication) {
             val book by viewModel.project.collectAsStateWithLifecycle()
             val excludedCharacters by viewModel.excludedCharacters.collectAsStateWithLifecycle()
             val excludedThreads by viewModel.excludedThreads.collectAsStateWithLifecycle()
+            val chapter = outlines.firstOrNull()?.chapters?.firstOrNull { it.id == outlineItemId }
             val memory = book?.let {
                 MemorySelector.select(
                     it.continuityState,
                     excludedCharacterIds = excludedCharacters,
                     excludedThreads = excludedThreads,
-                    inputBudget = it.creativeConfig?.inputBudget ?: 8_000
+                    inputBudget = it.creativeConfig?.inputBudget ?: 8_000,
+                    chapterHint = chapter?.let { item ->
+                        chapterMemoryHint(item.title, item.summary, item.characterChanges)
+                    }.orEmpty()
                 )
             }
-            val chapter = outlines.firstOrNull()?.chapters?.firstOrNull { it.id == outlineItemId }
             // 留洞后 orderIndex 不连续：取"序号更大的下一章"而不是 +1 精确匹配
             val nextChapter = outlines.firstOrNull()?.chapters
                 ?.sortedBy { it.orderIndex }

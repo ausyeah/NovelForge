@@ -3,6 +3,8 @@ package com.novelforge.app.presentation.settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
@@ -36,18 +39,25 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.novelforge.app.presentation.common.PaperTopBar
 import com.novelforge.app.ui.theme.WALLPAPER_FILE_NAME
-import com.novelforge.app.ui.theme.clearWallpaper
-import com.novelforge.app.ui.theme.copyWallpaper
+import com.novelforge.app.ui.theme.WallpaperStore
+import com.novelforge.app.ui.theme.decodeSampledBitmap
 import com.novelforge.app.data.security.ApiKeyStore
 import com.novelforge.app.data.settings.AppSettings
 import com.novelforge.app.data.settings.AppSettingsStore
+import com.novelforge.app.data.settings.ModelPreset
+import com.novelforge.app.data.settings.ModelPresetStore
+import com.novelforge.app.data.settings.upsertModelPreset
+import com.novelforge.app.ui.theme.PaperSurface
 import com.novelforge.app.infrastructure.jobs.ConnectionTestResult
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun SettingsScreen(
     settingsStore: AppSettingsStore,
+    presetStore: ModelPresetStore,
+    wallpaperStore: WallpaperStore,
     apiKeyStore: ApiKeyStore,
     onTestConnection: suspend () -> Result<ConnectionTestResult>,
     onFetchModels: suspend () -> Result<List<String>>,
@@ -62,32 +72,36 @@ fun SettingsScreen(
     var testing by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var connectionMessage by remember { mutableStateOf<String?>(null) }
+    var cropSource by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     val wallpaperPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
         scope.launch {
-            val copied = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                copyWallpaper(context, uri)
+            val decoded = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                decodeSampledBitmap(context, uri)
             }
-            if (!copied) {
-                connectionMessage = "这张图片没有放进去，换一张试试"
-                return@launch
+            if (decoded == null) {
+                connectionMessage = "这张图片没有读出来，换一张试试"
+            } else {
+                cropSource = decoded
             }
-            settings = settings.copy(wallpaperFileName = WALLPAPER_FILE_NAME)
-            settingsStore.update { current -> current.copy(wallpaperFileName = WALLPAPER_FILE_NAME) }
         }
     }
     var latencySummary by remember { mutableStateOf<String?>(null) }
     var models by remember { mutableStateOf<List<String>?>(null) }
     var fetchingModels by remember { mutableStateOf(false) }
     var loadedOk by remember { mutableStateOf(false) }
+    var presets by remember { mutableStateOf<List<ModelPreset>>(emptyList()) }
+    var editingPresetId by remember { mutableStateOf<String?>(null) }
+    var pendingDelete by remember { mutableStateOf<ModelPreset?>(null) }
 
     LaunchedEffect(Unit) {
         val settingsResult = runCatching { settingsStore.settings.first() }
         settingsResult.onSuccess { loaded ->
             settings = loaded
             apiKey = runCatching { apiKeyStore.read() }.getOrNull().orEmpty()
+            presets = runCatching { presetStore.read() }.getOrDefault(emptyList())
             if (settingsResult.isSuccess) loadedOk = true
         }.onFailure {
             // 读不到现配置时严禁保存：否则一次保存就把全部设置刷成默认并清掉 API Key
@@ -135,7 +149,7 @@ fun SettingsScreen(
             }) { Text(if (settings.wallpaperFileName.isBlank()) "选择图片" else "更换图片") }
             if (settings.wallpaperFileName.isNotBlank()) {
                 OutlinedButton(onClick = {
-                    clearWallpaper(context)
+                    wallpaperStore.clear()
                     settings = settings.copy(wallpaperFileName = "")
                     scope.launch {
                         settingsStore.update { current -> current.copy(wallpaperFileName = "") }
@@ -156,6 +170,45 @@ fun SettingsScreen(
                 },
                 valueRange = 35f..90f
             )
+        }
+        Text("已保存的配置", style = MaterialTheme.typography.titleSmall)
+        Text(
+            if (presets.isEmpty()) "保存设置时会记住这一套接口。点按拉回来改，长按删除。"
+            else "点按拉回表单再改，改完重新保存。长按删除。同名服务商会自动标成（2）。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        presets.forEach { preset ->
+            PaperSurface(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .combinedClickable(
+                            onClick = {
+                                settings = settings.copy(
+                                    providerName = preset.providerName,
+                                    baseUrl = preset.baseUrl,
+                                    model = preset.model,
+                                    disableThinking = preset.disableThinking
+                                )
+                                apiKey = preset.apiKey
+                                editingPresetId = preset.id
+                                saved = false
+                                connectionMessage = "已拉回「${preset.label}」，改完点保存"
+                            },
+                            onLongClick = { pendingDelete = preset }
+                        )
+                        .padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(preset.label, style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        listOf(preset.model, preset.baseUrl).filter { it.isNotBlank() }.joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
         }
         Text("连接", style = MaterialTheme.typography.titleSmall)
         OutlinedTextField(
@@ -261,7 +314,23 @@ fun SettingsScreen(
                 scope.launch {
                     busy = true
                     connectionMessage = null
-                    runCatching { persistSettings(settingsStore, apiKeyStore, settings, apiKey) }
+                    runCatching {
+                        persistSettings(settingsStore, apiKeyStore, settings, apiKey)
+                        if (apiKey.isNotBlank()) {
+                            presets = upsertModelPreset(
+                                existing = presets,
+                                editingId = editingPresetId,
+                                providerName = settings.providerName,
+                                baseUrl = settings.baseUrl,
+                                model = settings.model,
+                                disableThinking = settings.disableThinking,
+                                apiKey = apiKey,
+                                newId = { java.util.UUID.randomUUID().toString() }
+                            )
+                            presetStore.write(presets)
+                            editingPresetId = null
+                        }
+                    }
                         .onSuccess {
                             saved = true
                             connectionMessage = "设置已保存"
@@ -304,6 +373,39 @@ fun SettingsScreen(
             Text(if (testing) "测试中…" else "测试模型连接")
         }
         connectionMessage?.let { Text(it) }
+    }
+    pendingDelete?.let { preset ->
+        AlertDialog(
+            onDismissRequest = { pendingDelete = null },
+            title = { Text("删除「${preset.label}」？") },
+            text = { Text("只删除这份保存的接口，当前正在填写的内容还在。") },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingDelete = null
+                    val next = presets.filterNot { it.id == preset.id }
+                    presets = next
+                    if (editingPresetId == preset.id) editingPresetId = null
+                    scope.launch { runCatching { presetStore.write(next) } }
+                }) { Text("删除") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDelete = null }) { Text("取消") }
+            }
+        )
+    }
+    cropSource?.let { source ->
+        WallpaperCropDialog(
+            source = source,
+            onCancel = { cropSource = null },
+            onConfirm = { cropped ->
+                wallpaperStore.publish(cropped)
+                settings = settings.copy(wallpaperFileName = WALLPAPER_FILE_NAME)
+                cropSource = null
+                scope.launch {
+                    settingsStore.update { current -> current.copy(wallpaperFileName = WALLPAPER_FILE_NAME) }
+                }
+            }
+        )
     }
 }
 

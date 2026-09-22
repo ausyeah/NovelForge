@@ -15,18 +15,28 @@ import org.junit.Test
 class FakeBook : NovelBookStore {
     var queued: String? = null
     var storedProject: Project? = null
+    var savedProject: Project? = null
     var outline: OutlineVersion? = null
+    var savedOutline: OutlineVersion? = null
     var chapterRevisions: List<ChapterRevision> = emptyList()
+    var revisionWrites: Int = 0
 
     override suspend fun project(projectId: String): Project? =
         storedProject?.takeIf { it.id == projectId }
 
-    override suspend fun saveProject(project: Project) = Unit
+    override suspend fun saveProject(project: Project) {
+        savedProject = project
+        storedProject = project
+    }
 
     override suspend fun latestOutline(projectId: String): OutlineVersion? =
         outline?.takeIf { it.projectId == projectId }
 
-    override suspend fun saveOutline(version: OutlineVersion, project: Project) = Unit
+    override suspend fun saveOutline(version: OutlineVersion, project: Project) {
+        savedOutline = version
+        outline = version
+        storedProject = project
+    }
 
     override suspend fun revisions(projectId: String): List<ChapterRevision> =
         chapterRevisions.filter { it.projectId == projectId }
@@ -124,5 +134,94 @@ class NovelToolRegistryTest {
         assertTrue(ok.content.length < 500)
         val missing = registry.call("p", "read_chapter", buildJsonObject { put("chapterId", JsonPrimitive("nope")) })
         assertTrue(missing is ToolResult.Fail)
+    }
+
+    @Test
+    fun storyBibleDoesNotTreatPendingAsConfirmed() = runBlocking {
+        val book = bookWithChapters()
+        book.storedProject = book.storedProject!!.copy(
+            continuityState = book.storedProject!!.continuityState.copy(
+                worldRules = listOf("不能复活"),
+                unresolvedThreads = listOf("玉佩"),
+                characters = listOf(
+                    com.novelforge.app.domain.model.CharacterProfile(
+                        id = "a", projectId = "p", name = "阿禾", appearance = "左眼有疤"
+                    )
+                ),
+                factsWithSources = listOf(
+                    com.novelforge.app.domain.model.ContinuityFact(
+                        "f1", "阿禾丢了玉佩", "c1", confirmed = true, updatedAt = 1
+                    )
+                ),
+                pendingFacts = listOf(
+                    com.novelforge.app.domain.model.ContinuityFact(
+                        "p1", "还没确认的事", "c1", confirmed = false, updatedAt = 2
+                    )
+                )
+            )
+        )
+        val ok = NovelToolRegistry(book).call("p", "get_story_bible", JsonObject(emptyMap())) as ToolResult.Ok
+        val confirmed = ok.content.substringAfter("已确认事实").substringBefore("待确认")
+        assertTrue(confirmed.contains("阿禾丢了玉佩"))
+        assertTrue(!confirmed.contains("还没确认的事"))
+        assertTrue(ok.content.substringAfter("待确认").contains("还没确认的事"))
+    }
+
+    @Test
+    fun proposeFactStaysPending() = runBlocking {
+        val book = bookWithChapters()
+        val before = book.storedProject!!
+        val ok = NovelToolRegistry(book, now = { 9L }, newId = { "new-fact" }).call(
+            "p",
+            "propose_fact",
+            buildJsonObject {
+                put("statement", JsonPrimitive("阿禾左眼有疤"))
+                put("kind", JsonPrimitive("thread"))
+            }
+        )
+        assertTrue(ok is ToolResult.Ok)
+        val fact = book.savedProject!!.continuityState.pendingFacts.single()
+        assertEquals("new-fact", fact.id)
+        assertEquals(false, fact.confirmed)
+        assertEquals(before.continuityState.factsWithSources, book.savedProject!!.continuityState.factsWithSources)
+        assertEquals(before.continuityState.unresolvedThreads, book.savedProject!!.continuityState.unresolvedThreads)
+        val bad = NovelToolRegistry(book).call(
+            "p",
+            "propose_fact",
+            buildJsonObject { put("statement", JsonPrimitive("x")) }
+        )
+        assertTrue(bad is ToolResult.Fail)
+    }
+
+    @Test
+    fun patchOutlineWritesNewVersionWithoutTouchingRevisions() = runBlocking {
+        val book = bookWithChapters()
+        val ok = NovelToolRegistry(book, now = { 20L }, newId = { "outline-2" }).call(
+            "p",
+            "patch_outline",
+            buildJsonObject {
+                put("chapterId", JsonPrimitive("c1"))
+                put("summary", JsonPrimitive("阿禾决定下井"))
+            }
+        )
+        assertTrue(ok is ToolResult.Ok)
+        val saved = book.savedOutline!!
+        assertEquals("outline-2", saved.id)
+        assertEquals(2, saved.version)
+        assertEquals("阿禾决定下井", saved.chapters.first { it.id == "c1" }.summary)
+        assertEquals("丢失", saved.chapters.first { it.id == "c1" }.title)
+        assertEquals(0, book.revisionWrites)
+    }
+
+    @Test
+    fun queueChapterRefusesMissingOutlineItem() = runBlocking {
+        val book = bookWithChapters()
+        val registry = NovelToolRegistry(book)
+        val missing = registry.call("p", "queue_chapter", buildJsonObject { put("chapterId", JsonPrimitive("nope")) })
+        assertTrue(missing is ToolResult.Fail)
+        assertEquals(null, book.queued)
+        val ok = registry.call("p", "queue_chapter", buildJsonObject { put("chapterId", JsonPrimitive("c1")) }) as ToolResult.Ok
+        assertEquals("c1", book.queued)
+        assertTrue(ok.content.contains("job-1"))
     }
 }

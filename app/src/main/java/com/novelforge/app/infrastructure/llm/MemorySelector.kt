@@ -16,6 +16,7 @@ data class MemorySlice(
 
 /**
  * 下一章只带预算内的记忆：待确认的条目不进 prompt，角色和伏笔可以被本次生成排除。
+ * 传入本章标题和概要时，被点名的角色及其旧事实优先占预算，而不是只留最近写入的条目。
  */
 object MemorySelector {
     const val MAX_CHARACTERS = 6
@@ -27,19 +28,23 @@ object MemorySelector {
         state: ContinuityState,
         excludedCharacterIds: Set<String> = emptySet(),
         excludedThreads: Set<String> = emptySet(),
-        inputBudget: Int = 8_000
+        inputBudget: Int = 8_000,
+        chapterHint: String = ""
     ): MemorySlice {
         val fieldLimit = (inputBudget / 40).coerceIn(40, 120)
+        val hint = chapterHint.trim()
         val eligibleCharacters = state.characters.filter { it.id !in excludedCharacterIds && it.name.isNotBlank() }
-        val characters = eligibleCharacters.take(MAX_CHARACTERS).map { it.clipped(fieldLimit) }
-        val threads = state.unresolvedThreads
-            .map { it.trim() }
-            .filter { it.isNotEmpty() && it !in excludedThreads }
-            .take(MAX_THREADS)
-        val facts = state.factsWithSources
-            .filter { it.confirmed && it.statement.isNotBlank() }
-            .sortedBy { it.updatedAt }
-            .takeLast(MAX_FACTS)
+        val mentionedNames = eligibleCharacters
+            .map { it.name.trim() }
+            .filter { it.length >= 2 && hint.contains(it) }
+        val characters = prioritize(eligibleCharacters, hint) { it.name.trim() }
+            .take(MAX_CHARACTERS)
+            .map { it.clipped(fieldLimit) }
+        val threads = prioritize(
+            state.unresolvedThreads.map { it.trim() }.filter { it.isNotEmpty() && it !in excludedThreads },
+            hint
+        ) { it }.take(MAX_THREADS)
+        val facts = selectFacts(state.factsWithSources, hint, mentionedNames)
         val continuity = state.copy(
             worldRules = state.worldRules.map { it.trim() }.filter { it.isNotEmpty() }.take(MAX_RULES),
             characterStates = emptyList(),
@@ -61,6 +66,33 @@ object MemorySelector {
         )
     }
 
+    private fun selectFacts(
+        facts: List<ContinuityFact>,
+        hint: String,
+        mentionedNames: List<String>
+    ): List<ContinuityFact> {
+        val eligible = facts.filter { it.confirmed && it.statement.isNotBlank() }
+        val newestFirst = eligible.sortedByDescending { it.updatedAt }
+        val picked = if (hint.isEmpty() || mentionedNames.isEmpty()) {
+            newestFirst.take(MAX_FACTS)
+        } else {
+            val (hit, miss) = newestFirst.partition { fact ->
+                mentionedNames.any { name -> fact.statement.contains(name) }
+            }
+            (hit + miss).take(MAX_FACTS)
+        }
+        return picked.sortedBy { it.updatedAt }
+    }
+
+    private fun <T> prioritize(items: List<T>, hint: String, text: (T) -> String): List<T> {
+        if (hint.isEmpty()) return items
+        val (hit, miss) = items.partition { item ->
+            val value = text(item)
+            value.length >= 2 && hint.contains(value)
+        }
+        return hit + miss
+    }
+
     private fun CharacterProfile.clipped(limit: Int) = copy(
         appearance = appearance.take(limit),
         personality = personality.take(limit),
@@ -69,6 +101,13 @@ object MemorySelector {
         relationships = relationships.entries.take(4).associate { it.key.take(12) to it.value.take(limit) }
     )
 }
+
+/** 本章标题、概要、角色变化。记忆选择用它把相关旧设定从预算里捞回来。 */
+fun chapterMemoryHint(title: String, summary: String, characterChanges: String? = null): String =
+    listOf(title, summary, characterChanges.orEmpty())
+        .map { it.trim() }
+        .filter { it.isNotEmpty() }
+        .joinToString("\n")
 
 @kotlinx.serialization.Serializable
 private data class MemoryNotePayload(

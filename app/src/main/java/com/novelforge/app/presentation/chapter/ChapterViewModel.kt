@@ -17,6 +17,7 @@ import com.novelforge.app.domain.repository.ProjectRepository
 import com.novelforge.app.infrastructure.jobs.GenerationRuntime
 import com.novelforge.app.infrastructure.llm.ChapterContext
 import com.novelforge.app.infrastructure.llm.MemorySelector
+import com.novelforge.app.infrastructure.llm.chapterMemoryHint
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import java.util.UUID
@@ -103,7 +104,8 @@ class ChapterViewModel(
                 state = project.continuityState,
                 excludedCharacterIds = _excludedCharacters.value,
                 excludedThreads = _excludedThreads.value,
-                inputBudget = project.creativeConfig?.inputBudget ?: 8_000
+                inputBudget = project.creativeConfig?.inputBudget ?: 8_000,
+                chapterHint = chapterMemoryHint(chapter.title, chapter.summary, chapter.characterChanges)
             )
             val context = ChapterContext(
                 continuityState = memory.continuity,

@@ -1,6 +1,29 @@
 # NovelForge
 
-NovelForge 是一个本地 BYOK（Bring Your Own Key）中文小说创作 App。当前工程处于 MVP 动工阶段，目标闭环是：配置模型 → 创建项目 → 生成/编辑大纲 → 逐章生成 → 任务恢复 → TXT 导出。
+本地 BYOK 的中文长篇写作应用。模型不负责记设定：每一章生成前，程序从连续性状态里挑出预算内的角色、事实和伏笔，再交给模型写。任务用 WorkManager 跑，页面关掉也能恢复；结构不对的输出不会写入正文。
+
+API Key 只以 Android Keystore 保护的 AES-GCM 密文留在本机。
+
+## 记忆预算
+
+只留最近 12 条事实时，写到后面的章节会把开头的关键设定挤出 prompt。`MemorySelector` 在同样的名额里，优先留下本章标题和概要点到的角色，以及这些角色的旧事实。未确认的章后笔记仍然不进 prompt。
+
+下面这组对照不调用模型，只检查三条必须记住的旧设定有没有进下一章上下文。「全量塞入」能记住，但会带上未确认事实，prompt 也更大。
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest --tests com.novelforge.app.infrastructure.llm.ContinuityBenchmarkTest
+```
+
+固定样本是 7 个角色、20 条已确认事实、1 条未确认笔记，本章要点名第 7 个角色和他最早的那条旧设定。测试锁定的结果：
+
+| 策略 | 必须记住的设定 | 未确认笔记漏进 prompt |
+|---|---|---|
+| 不带记忆 | 0/3 | 0 |
+| 只留最近 12 条 | 0/3 | 0 |
+| 按本章捞回 | 3/3 | 0 |
+| 全量塞入 | 3/3 | 1 |
+
+简历可以写「同样名额下，旧设定召回从 0/3 到 3/3，未确认笔记仍不进入上下文」。这是选择器的对照，不是请人评的正文质量。
 
 ## 当前范围
 
@@ -8,7 +31,7 @@ NovelForge 是一个本地 BYOK（Bring Your Own Key）中文小说创作 App。
 - 项目、生成任务、章节修订和模型调用记录保存在本地 Room。
 - API Key 使用 Android Keystore 保护的 AES-GCM 密文存储；不会内置共享 Key。
 - Provider 以 OpenAI-compatible 为传输基线，但 JSON、流式、usage、鉴权和参数名必须由能力矩阵声明。
-- 当前 UI 已包含项目列表、新建草稿、模型设置、连接测试、结构化大纲编辑、逐章生成、取消/重试和 TXT Sharesheet 分享。
+- 当前 UI 包含项目、创作设置、大纲、逐章生成、故事圣经、章节阅读、查书助手、灵感对话、导出、用量账本和模型设置。
 - 生成请求会先保存 prompt 快照，再由 WorkManager 执行；任务状态、部分正文、章节修订和 LLM 用量写入 Room，Activity 被销毁后仍可恢复任务。
 - 生成完成时，大纲/章节修订与项目当前版本指针通过 Room 事务一起提交，避免只写入一半。
 - 当前运行时按 OpenAI-compatible 的 HTTPS、Bearer 鉴权、流式 SSE、JSON object 能力作为默认预设；其他 Provider 需要在能力矩阵基础上继续扩展设置项。
@@ -34,7 +57,7 @@ Windows 下 Android Gradle Plugin 对中文路径较敏感，工程已设置 `an
 .\gradlew.bat :app:lintDebug
 ```
 
-没有可连接的模拟器时，`connectedDebugAndroidTest` 不能报告设备测试通过；应把它记录为环境阻塞而不是通过。当前 MVP 的本地单元测试和 AndroidTest 源码编译不依赖真实模型 API Key。
+没有可连接的模拟器时，`connectedDebugAndroidTest` 不能报告设备测试通过；应把它记录为环境阻塞而不是通过。本地单元测试和 AndroidTest 源码编译不依赖真实模型 API Key。
 
 ## API Key 与数据边界
 
@@ -44,7 +67,7 @@ API Key 只在配置页或请求执行期间存在于内存，并以 Android Key
 
 - 生成结果要求模型返回大纲数组或 `{"summary":"...","content":"..."}` 章节对象；结构校验失败会把任务置为“需要处理”，不会静默写入正文。
 - 断点恢复保留任务已收到的部分正文。对结构化 JSON 任务重试时会从同一 prompt 重新生成，避免把两个不完整 JSON 拼接成非法结果；后续可增加真正的 token 级续写。
-- 当前只接入一个默认 OpenAI-compatible 运行时预设；Provider 能力矩阵已经独立，UI 中的多 Provider 参数配置仍是后续工作。
+- 运行时仍是一套 OpenAI-compatible 传输。模型设置可以保存多套接口预设：点按拉回编辑，长按删除；同一服务商的不同接口会标成「名称（2）」。API Key 随预设加密保存。
 - 设备测试需要 API 35 模拟器或真机；没有设备时只验证单元测试、AndroidTest 编译、lint 和 APK 打包。
 
 ## 工程结构
@@ -57,4 +80,4 @@ app/src/main/java/com/novelforge/app/
 └── infrastructure/     LLM、WorkManager、TXT 导出
 ```
 
-技术方案见：`C:\Users\26315\.fintwind\projects\2026-09-18\new-chat-3\novel-app-技术方案.md`（v1.3）。
+需求与实现笔记在 `docs/requirements/` 和 `docs/superpowers/plans/`。记忆选择的对照数据由 `ContinuityBenchmark` 生成，不依赖本机绝对路径。

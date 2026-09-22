@@ -23,7 +23,7 @@ API Key 只以 Android Keystore 保护的 AES-GCM 密文留在本机。
 | 按本章捞回 | 3/3 | 0 |
 | 全量塞入 | 3/3 | 1 |
 
-简历可以写「同样名额下，旧设定召回从 0/3 到 3/3，未确认笔记仍不进入上下文」。这是选择器的对照，不是请人评的正文质量。
+同样名额下，必须记住的旧设定从 0/3 变成 3/3，未确认笔记仍然不进入上下文。这是选择器的对照，不是正文质量评分。
 
 ## 当前范围
 
@@ -34,8 +34,8 @@ API Key 只以 Android Keystore 保护的 AES-GCM 密文留在本机。
 - 当前 UI 包含项目、创作设置、大纲、逐章生成、故事圣经、章节阅读、查书助手、灵感对话、导出、用量账本和模型设置。
 - 生成请求会先保存 prompt 快照，再由 WorkManager 执行；任务状态、部分正文、章节修订和 LLM 用量写入 Room，Activity 被销毁后仍可恢复任务。
 - 生成完成时，大纲/章节修订与项目当前版本指针通过 Room 事务一起提交，避免只写入一半。
-- 当前运行时按 OpenAI-compatible 的 HTTPS、Bearer 鉴权、流式 SSE、JSON object 能力作为默认预设；其他 Provider 需要在能力矩阵基础上继续扩展设置项。
-- 云同步、在线分享链接、EPUB、社区、TTS、AI 配图和完整 LLM 质检属于后续版本。
+- 大纲页的查书助手最多 6 步，只能调用本书内的工具：搜索摘录、阅读结尾、读取故事圣经、提议待确认事实、修改大纲、排队写章。待确认事实不会进入下一章。
+- 云同步、在线分享链接、EPUB、社区、TTS、AI 配图和让模型给自己打分，不在当前范围内。
 
 ## 构建环境
 
@@ -66,7 +66,7 @@ API Key 只在配置页或请求执行期间存在于内存，并以 Android Key
 ## 当前已知边界
 
 - 生成结果要求模型返回大纲数组或 `{"summary":"...","content":"..."}` 章节对象；结构校验失败会把任务置为“需要处理”，不会静默写入正文。
-- 断点恢复保留任务已收到的部分正文。对结构化 JSON 任务重试时会从同一 prompt 重新生成，避免把两个不完整 JSON 拼接成非法结果；后续可增加真正的 token 级续写。
+- 正文生成由 WorkManager 恢复。查书助手的轨迹存在本地，应用重启后可以从最后一条已保存步骤继续，但这次循环本身不会由系统重新拉起。
 - 运行时仍是一套 OpenAI-compatible 传输。模型设置可以保存多套接口预设：点按拉回编辑，长按删除；同一服务商的不同接口会标成「名称（2）」。API Key 随预设加密保存。
 - 设备测试需要 API 35 模拟器或真机；没有设备时只验证单元测试、AndroidTest 编译、lint 和 APK 打包。
 
@@ -74,10 +74,11 @@ API Key 只在配置页或请求执行期间存在于内存，并以 Android Key
 
 ```text
 app/src/main/java/com/novelforge/app/
+├── agent/              本书工具、六步查书循环
 ├── presentation/       Compose UI、导航、ViewModel
-├── domain/              领域模型、Repository、用例
-├── data/                Room、DataStore、Keystore、Repository 实现
+├── domain/             领域模型、Repository、用例
+├── data/               Room、DataStore、Keystore、Repository 实现
 └── infrastructure/     LLM、WorkManager、TXT 导出
 ```
 
-需求与实现笔记在 `docs/requirements/` 和 `docs/superpowers/plans/`。记忆选择的对照数据由 `ContinuityBenchmark` 生成，不依赖本机绝对路径。
+秋招定位和还没做完的边界写在 `docs/recruiting/2026-09-22-autumn-recruiting-position.md`。实现笔记在 `docs/superpowers/plans/`。

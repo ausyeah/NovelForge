@@ -45,6 +45,30 @@ class NovelAgentTest {
         assertEquals(6, trace.count { it.kind == "tool" })
         assertTrue(trace.last().detail.contains("6 步上限"))
     }
+
+    @Test
+    fun queueChapterIsNotRepeatedInTheSameTrace() = runBlocking {
+        val book = bookForAgent()
+        var queues = 0
+        val counting = object : NovelBookStore by book {
+            override suspend fun queueChapter(projectId: String, outlineItemId: String): String {
+                queues += 1
+                return book.queueChapter(projectId, outlineItemId)
+            }
+        }
+        val agent = NovelAgent(
+            NovelToolRegistry(counting),
+            AgentModel { _, _, _ ->
+                AgentDecision.CallTool(
+                    "queue_chapter",
+                    buildJsonObject { put("chapterId", JsonPrimitive("c1")) }
+                )
+            }
+        )
+        val trace = agent.run("p", "写这一章")
+        assertEquals(1, queues)
+        assertTrue(trace.any { it.detail.contains("不再重复") })
+    }
 }
 
 private fun bookForAgent(): FakeBook {

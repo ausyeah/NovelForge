@@ -10,6 +10,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -30,7 +31,11 @@ fun AgentAssistCard(
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
     var input by rememberSaveable { mutableStateOf("") }
+    val toolCount = steps.count { it.kind == "tool" }
     val canContinue = steps.lastOrNull()?.kind == "tool" && !busy
+    LaunchedEffect(busy, steps.size) {
+        if (busy || steps.isNotEmpty()) open = true
+    }
     PaperSurface(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(12.dp),
@@ -38,7 +43,7 @@ fun AgentAssistCard(
         ) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(
-                    if (steps.isEmpty()) "查书助手" else "查书助手 · ${steps.size} 步",
+                    if (toolCount == 0) "查书助手" else "查书助手 · $toolCount/6 步",
                     style = MaterialTheme.typography.titleSmall,
                     modifier = Modifier.weight(1f)
                 )
@@ -46,26 +51,27 @@ fun AgentAssistCard(
             }
             if (open) {
                 Text(
-                    "最多查 6 步。每一步都会记下，划掉应用后可以继续。",
+                    "只查这本书，最多 6 步。每记下一步，重新打开后可以继续。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 steps.takeLast(8).forEach { step ->
-                    Text("${step.title}：${step.detail.take(180)}", style = MaterialTheme.typography.bodySmall)
+                    Text(step.readable(), style = MaterialTheme.typography.bodySmall)
                 }
-                error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                error?.let {
+                    Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                }
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("想查什么") },
-                    singleLine = true
+                    singleLine = true,
+                    enabled = !busy
                 )
                 PaperButton(
                     if (busy) "正在查…" else "开始查",
-                    onClick = {
-                        onAsk(input)
-                    },
+                    onClick = { onAsk(input) },
                     enabled = !busy && input.isNotBlank(),
                     modifier = Modifier.fillMaxWidth(),
                     accent = true
@@ -76,4 +82,17 @@ fun AgentAssistCard(
             }
         }
     }
+}
+
+private fun AgentStep.readable(): String {
+    val body = if (tool == "search_chapters") readableSearch(detail) else detail.take(180)
+    return "$title：$body"
+}
+
+private fun readableSearch(detail: String): String {
+    if (!detail.contains('|')) return detail.take(180)
+    return detail.lines().joinToString("；") { line ->
+        val parts = line.split('|', limit = 3)
+        if (parts.size < 3) line else "「${parts[1]}」${parts[2]}"
+    }.take(180)
 }

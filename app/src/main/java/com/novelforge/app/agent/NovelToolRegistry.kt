@@ -181,7 +181,7 @@ class NovelToolRegistry(
         if (outline.chapters.none { it.id == chapterId }) return ToolResult.Fail("章节不存在")
         return try {
             val jobId = store.queueChapter(projectId, chapterId)
-            ToolResult.Ok("已排队 $jobId")
+            ToolResult.Ok("已排队 $chapterId $jobId")
         } catch (cancelled: kotlinx.coroutines.CancellationException) {
             throw cancelled
         } catch (error: Exception) {

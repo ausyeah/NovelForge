@@ -4,7 +4,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -55,8 +58,18 @@ fun AgentAssistCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                steps.takeLast(8).forEach { step ->
-                    Text(step.readable(), style = MaterialTheme.typography.bodySmall)
+                if (steps.isNotEmpty()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 280.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        steps.forEach { step ->
+                            Text(step.readable(), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
                 }
                 error?.let {
                     Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
@@ -85,14 +98,14 @@ fun AgentAssistCard(
 }
 
 private fun AgentStep.readable(): String {
-    val body = if (tool == "search_chapters") readableSearch(detail) else detail.take(180)
+    val body = if (tool == "search_chapters") readableSearch(detail) else detail
     return "$title：$body"
 }
 
 private fun readableSearch(detail: String): String {
-    if (!detail.contains('|')) return detail.take(180)
-    return detail.lines().joinToString("；") { line ->
+    if (!detail.contains('|')) return detail
+    return detail.lines().joinToString("\n") { line ->
         val parts = line.split('|', limit = 3)
         if (parts.size < 3) line else "「${parts[1]}」${parts[2]}"
-    }.take(180)
+    }
 }

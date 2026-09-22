@@ -66,7 +66,7 @@ class LlmAgentModel(
                     disableThinking = true
                 ),
                 options = ChatOptions(
-                    outputTokenBudget = 512,
+                    outputTokenBudget = 2_048,
                     requestId = "agent-${System.currentTimeMillis()}",
                     timeoutMs = 60_000L
                 )

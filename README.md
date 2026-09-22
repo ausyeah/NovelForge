@@ -1,20 +1,16 @@
 # NovelForge
 
-本地 BYOK 的中文长篇写作应用。模型不负责记设定：每一章生成前，程序从连续性状态里挑出预算内的角色、事实和伏笔，再交给模型写。任务用 WorkManager 跑，页面关掉也能恢复；结构不对的输出不会写入正文。
+本地优先的 Android 长篇写作应用。你带自己的模型 Key。程序负责记住设定、恢复任务和限制上下文，模型只负责写。
 
-API Key 只以 Android Keystore 保护的 AES-GCM 密文留在本机。
+写下一章之前，会从连续性状态里挑出预算内的角色、已确认事实和未解伏笔。未确认的笔记不会进 prompt。结构不合法的输出不会写入正文。生成任务交给 WorkManager，页面关掉后仍可恢复。
 
-## 记忆预算
+API Key 只以 Android Keystore 保护的 AES-GCM 密文留在这台手机上。
 
-只留最近 12 条事实时，写到后面的章节会把开头的关键设定挤出 prompt。`MemorySelector` 在同样的名额里，优先留下本章标题和概要点到的角色，以及这些角色的旧事实。未确认的章后笔记仍然不进 prompt。
+## 这个项目在解决什么
 
-下面这组对照不调用模型，只检查三条必须记住的旧设定有没有进下一章上下文。「全量塞入」能记住，但会带上未确认事实，prompt 也更大。
+长篇生成失败，通常不是因为单章写不出来，而是写到后面把开头的设定挤出了上下文，或者把模型自己抽出的笔记当成了已经发生的事。
 
-```powershell
-.\gradlew.bat :app:testDebugUnitTest --tests com.novelforge.app.infrastructure.llm.ContinuityBenchmarkTest
-```
-
-固定样本是 7 个角色、20 条已确认事实、1 条未确认笔记，本章要点名第 7 个角色和他最早的那条旧设定。测试锁定的结果：
+`MemorySelector` 用固定名额做对照，不调用模型。样本是 7 个角色、20 条已确认事实、1 条未确认笔记。本章要点名其中一个角色，以及他最早的那条旧设定。
 
 | 策略 | 必须记住的设定 | 未确认笔记漏进 prompt |
 |---|---|---|
@@ -23,62 +19,62 @@ API Key 只以 Android Keystore 保护的 AES-GCM 密文留在本机。
 | 按本章捞回 | 3/3 | 0 |
 | 全量塞入 | 3/3 | 1 |
 
-同样名额下，必须记住的旧设定从 0/3 变成 3/3，未确认笔记仍然不进入上下文。这是选择器的对照，不是正文质量评分。
-
-## 当前范围
-
-- Android 原生，Kotlin + Jetpack Compose，`minSdk 26`。
-- 项目、生成任务、章节修订和模型调用记录保存在本地 Room。
-- API Key 使用 Android Keystore 保护的 AES-GCM 密文存储；不会内置共享 Key。
-- Provider 以 OpenAI-compatible 为传输基线，但 JSON、流式、usage、鉴权和参数名必须由能力矩阵声明。
-- 当前 UI 包含项目、创作设置、大纲、逐章生成、故事圣经、章节阅读、查书助手、灵感对话、导出、用量账本和模型设置。
-- 生成请求会先保存 prompt 快照，再由 WorkManager 执行；任务状态、部分正文、章节修订和 LLM 用量写入 Room，Activity 被销毁后仍可恢复任务。
-- 生成完成时，大纲/章节修订与项目当前版本指针通过 Room 事务一起提交，避免只写入一半。
-- 大纲页可以针对这本书提问。程序先附上大纲和相关片段，不把全文发给模型。
-- 云同步、在线分享链接、EPUB、社区、TTS、AI 配图和让模型给自己打分，不在当前范围内。
-
-## 构建环境
-
-- JDK 17
-- Android SDK Platform 35
-- Android Build Tools 34 或更高
-- Gradle Wrapper 8.9
-
-首次导入时在本机安装 Android SDK，并让 `local.properties` 指向 SDK。`local.properties` 已加入 `.gitignore`，不会作为项目配置提交。
-
-Windows 下 Android Gradle Plugin 对中文路径较敏感，工程已设置 `android.overridePathCheck=true`。如果 forked 的 JUnit 进程仍出现路径乱码，建议用 Android Studio 打开项目，或从 ASCII 路径映射/Junction 运行 Gradle；源码不需要复制。
-
-## 常用命令
+同样名额下，必须记住的旧设定从 0/3 变成 3/3。全量塞入也能记住，但会把未确认笔记带进去，prompt 也更大。
 
 ```powershell
-.\gradlew.bat :app:testDebugUnitTest
-.\gradlew.bat :app:compileDebugAndroidTestKotlin
-.\gradlew.bat :app:assembleDebug
-.\gradlew.bat :app:lintDebug
+.\gradlew.bat :app:testDebugUnitTest --tests com.novelforge.app.infrastructure.llm.ContinuityBenchmarkTest
 ```
 
-没有可连接的模拟器时，`connectedDebugAndroidTest` 不能报告设备测试通过；应把它记录为环境阻塞而不是通过。本地单元测试和 AndroidTest 源码编译不依赖真实模型 API Key。
+针对这本书提问时也一样：程序附上大纲和相关片段，不发送全文。
 
-## API Key 与数据边界
+## 现在能做什么
 
-API Key 只在配置页或请求执行期间存在于内存，并以 Android Keystore 保护的 AES-GCM 密文保存；备份规则排除数据库、文件和设置。不要把 Key、prompt、正文或完整响应写入 Logcat、崩溃上报或 issue。生成时，用户主动提交的问答、角色、上下文和正文会发送给其配置的 LLM 服务商，数据留存和训练政策以该服务商为准。
+- 配置一套或多套 OpenAI-compatible 接口。点按预设拉回编辑，长按删除。同一服务商的不同接口会标成「名称（2）」。
+- 从题材、文笔和篇幅生成大纲，再逐章写正文。
+- 维护本书记忆：角色、不能违反的规则、未解伏笔。章后抽出的笔记要确认后才进入下一章。
+- 在大纲页提问。材料是各章标题、概要，以及问题命中的短摘录。
+- 阅读、对照上一稿、导出 TXT、查看 Token 用量。
+- 换一张壁纸。取景比例锁定为手机屏幕。
 
-## 当前已知边界
+云同步、社区、TTS、AI 配图和让模型给自己打分，不在当前范围内。
 
-- 生成结果要求模型返回大纲数组或 `{"summary":"...","content":"..."}` 章节对象；结构校验失败会把任务置为“需要处理”，不会静默写入正文。
-- 正文生成由 WorkManager 恢复。查书助手的轨迹存在本地，应用重启后可以从最后一条已保存步骤继续，但这次循环本身不会由系统重新拉起。
-- 运行时仍是一套 OpenAI-compatible 传输。模型设置可以保存多套接口预设：点按拉回编辑，长按删除；同一服务商的不同接口会标成「名称（2）」。API Key 随预设加密保存。
-- 设备测试需要 API 35 模拟器或真机；没有设备时只验证单元测试、AndroidTest 编译、lint 和 APK 打包。
+## 工程
 
-## 工程结构
+Android 原生，Kotlin，Jetpack Compose，`minSdk 26`。本地数据在 Room。后台生成用 WorkManager。大纲、修订和项目版本指针在同一个事务里提交。
 
 ```text
 app/src/main/java/com/novelforge/app/
-├── agent/              本书工具、六步查书循环
-├── presentation/       Compose UI、导航、ViewModel
-├── domain/             领域模型、Repository、用例
-├── data/               Room、DataStore、Keystore、Repository 实现
-└── infrastructure/     LLM、WorkManager、TXT 导出
+├── agent/           提问时如何挑选大纲和相关片段
+├── presentation/    Compose UI、导航、ViewModel
+├── domain/          领域模型、Repository、用例
+├── data/            Room、DataStore、Keystore
+└── infrastructure/  LLM、WorkManager、导出
 ```
 
-秋招定位和还没做完的边界写在 `docs/recruiting/2026-09-22-autumn-recruiting-position.md`。实现笔记在 `docs/superpowers/plans/`。
+## 构建
+
+- JDK 17
+- Android SDK Platform 35
+- Gradle Wrapper 8.9
+
+把本机 SDK 路径写进 `local.properties`。这个文件已忽略，不会提交。
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest
+.\gradlew.bat :app:assembleDebug
+```
+
+没有设备时，不要把 `connectedDebugAndroidTest` 记成通过。单元测试不需要真实的 API Key。
+
+Windows 上如果工程路径含中文，已设置 `android.overridePathCheck=true`。JUnit 子进程仍出现路径乱码时，用 Android Studio 打开，或从 ASCII 路径的目录联接运行 Gradle。
+
+## 数据边界
+
+Key、prompt 和正文不要写入 Logcat 或崩溃上报。备份不包含数据库和 Key。用户主动提交的内容和设定会发给他自己配置的模型服务，留存政策以该服务商为准。
+
+## 已知边界
+
+- 大纲和章节必须返回约定的 JSON。校验失败时任务停在「需要处理」，不会静默写入。
+- 结构化生成中断后，用原来的 prompt 重新生成，避免把两段残缺 JSON 拼在一起。
+- 提问的回答保存在本地。这次提问本身不是 WorkManager 任务，进程死在请求中途时需要再问一次。
+- 传输层目前是 OpenAI-compatible 的 HTTPS 和 Bearer 鉴权。

@@ -21,7 +21,6 @@ import com.novelforge.app.data.repository.RoomProjectRepository
 import com.novelforge.app.data.security.KeystoreApiKeyStore
 import com.novelforge.app.agent.BookQuestion
 import com.novelforge.app.agent.LlmAgentModel
-import com.novelforge.app.agent.NovelToolRegistry
 import com.novelforge.app.agent.RoomNovelBookStore
 import com.novelforge.app.data.agent.AgentTraceStore
 import com.novelforge.app.data.settings.AppSettingsStore
@@ -68,7 +67,6 @@ class NovelForgeApplication : Application(), GenerationWorkerDependenciesProvide
             }
         )
     }
-    val novelToolRegistry by lazy { NovelToolRegistry(bookStore) }
     val agentModel by lazy { LlmAgentModel(appSettingsStore, apiKeyStore) }
     val bookQuestion by lazy {
         BookQuestion(bookStore) { context, question ->

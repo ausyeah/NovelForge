@@ -13,7 +13,6 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -33,9 +32,6 @@ fun AgentAssistCard(
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
     var input by rememberSaveable { mutableStateOf("") }
-    LaunchedEffect(busy, steps.size) {
-        if (busy || steps.isNotEmpty()) open = true
-    }
     PaperSurface(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(12.dp),

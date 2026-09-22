@@ -54,7 +54,52 @@ class NovelToolRegistry(
         if (name == "search_chapters" && arguments.text("query").isEmpty()) {
             return ToolResult.Fail("查询不能为空")
         }
-        return ToolResult.Fail("尚未实现")
+        return when (name) {
+            "search_chapters" -> searchChapters(projectId, arguments.text("query"))
+            "read_chapter" -> readChapter(projectId, arguments.text("chapterId"))
+            else -> ToolResult.Fail("尚未实现")
+        }
+    }
+
+    private suspend fun searchChapters(projectId: String, query: String): ToolResult {
+        val outline = store.latestOutline(projectId) ?: return ToolResult.Ok("没有找到")
+        val latestRevision = store.revisions(projectId)
+            .groupBy { it.outlineItemId }
+            .mapValues { (_, revisions) -> revisions.maxBy { it.revision } }
+        val lines = outline.chapters
+            .sortedBy { it.orderIndex }
+            .mapNotNull { item ->
+                val revision = latestRevision[item.id]
+                val hit = listOf(
+                    item.title,
+                    item.summary,
+                    revision?.summary.orEmpty(),
+                    revision?.content.orEmpty()
+                ).firstOrNull { it.contains(query) } ?: return@mapNotNull null
+                "${item.id}|${item.title}|${excerpt(hit, query)}"
+            }
+            .take(5)
+        if (lines.isEmpty()) return ToolResult.Ok("没有找到")
+        return ToolResult.Ok(lines.joinToString("\n"))
+    }
+
+    private fun excerpt(text: String, query: String): String {
+        val index = text.indexOf(query)
+        if (index < 0) return ""
+        val start = (index - 20).coerceAtLeast(0)
+        val end = (index + query.length + 40).coerceAtMost(text.length)
+        return text.substring(start, end).take(120)
+    }
+
+    private suspend fun readChapter(projectId: String, chapterId: String): ToolResult {
+        val item = store.latestOutline(projectId)?.chapters?.find { it.id == chapterId }
+            ?: return ToolResult.Fail("章节不存在")
+        val revision = store.revisions(projectId)
+            .filter { it.outlineItemId == item.id }
+            .maxByOrNull { it.revision }
+            ?: return ToolResult.Fail("章节不存在")
+        val tail = revision.content.takeLast(400)
+        return ToolResult.Ok("摘要：${revision.summary.orEmpty()}\n结尾：$tail")
     }
 }
 

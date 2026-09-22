@@ -22,16 +22,26 @@ import kotlinx.serialization.json.Json
 
 private val mapperJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
+private inline fun <reified T : Enum<T>> enumOr(raw: String, fallback: T): T =
+    enumValues<T>().firstOrNull { it.name == raw } ?: fallback
+
+private inline fun <reified T> decodeOr(raw: String?, fallback: T): T {
+    if (raw.isNullOrBlank()) return fallback
+    return runCatching { mapperJson.decodeFromString<T>(raw) }.getOrDefault(fallback)
+}
+
 fun ProjectEntity.toDomain(): Project = Project(
     id = id,
     title = title,
     questionnaireSchemaVersion = questionnaireSchemaVersion,
-    flowState = FlowState.valueOf(flowState),
-    questData = mapperJson.decodeFromString<QuestData>(questDataJson),
-    creativeConfig = creativeConfigJson?.let { mapperJson.decodeFromString<CreativeConfig>(it) },
-    continuityState = mapperJson.decodeFromString<ContinuityState>(continuityStateJson),
+    flowState = enumOr(flowState, FlowState.INIT),
+    questData = decodeOr(questDataJson, QuestData()),
+    creativeConfig = creativeConfigJson?.let { raw ->
+        runCatching { mapperJson.decodeFromString<CreativeConfig>(raw) }.getOrNull()
+    },
+    continuityState = decodeOr(continuityStateJson, ContinuityState()),
     activeOutlineVersionId = activeOutlineVersionId,
-    status = ProjectStatus.valueOf(status),
+    status = enumOr(status, ProjectStatus.DRAFT),
     createdAt = createdAt,
     updatedAt = updatedAt
 )
@@ -54,8 +64,8 @@ fun GenerationJobEntity.toDomain(): GenerationJob = GenerationJob(
     id = id,
     projectId = projectId,
     targetId = targetId,
-    purpose = GenerationPurpose.valueOf(purpose),
-    status = GenerationJobStatus.valueOf(status),
+    purpose = enumOr(purpose, GenerationPurpose.OUTLINE),
+    status = enumOr(status, GenerationJobStatus.FAILED),
     clientRequestId = clientRequestId,
     attempt = attempt,
     partialContent = partialContent,
@@ -88,7 +98,7 @@ fun OutlineVersionEntity.toDomain(): OutlineVersion = OutlineVersion(
     id = id,
     projectId = projectId,
     version = version,
-    chapters = mapperJson.decodeFromString<List<OutlineItem>>(chaptersJson),
+    chapters = decodeOr(chaptersJson, emptyList<OutlineItem>()),
     diffSummary = diffSummary,
     createdAt = createdAt
 )
@@ -111,7 +121,7 @@ fun ChapterRevisionEntity.toDomain(): ChapterRevision = ChapterRevision(
     title = title,
     content = content,
     summary = summary,
-    status = ChapterStatus.valueOf(status),
+    status = enumOr(status, ChapterStatus.FAILED),
     promptSnapshotId = promptSnapshotId,
     createdAt = createdAt
 )
@@ -152,14 +162,16 @@ fun LlmCallEntity.toDomain(): LlmCall = LlmCall(
     id = id,
     projectId = projectId,
     jobId = jobId,
-    purpose = GenerationPurpose.valueOf(purpose),
+    purpose = enumOr(purpose, GenerationPurpose.OUTLINE),
     provider = provider,
     model = model,
     usage = LlmUsage(
         inputTokens = inputTokens,
         outputTokens = outputTokens,
         totalTokens = totalTokens,
-        estimated = estimated
+        estimated = estimated,
+        cachedInputTokens = cachedInputTokens,
+        reasoningTokens = reasoningTokens
     ),
     durationMs = durationMs,
     success = success,
@@ -177,6 +189,8 @@ fun LlmCall.toEntity(): LlmCallEntity = LlmCallEntity(
     outputTokens = usage.outputTokens,
     totalTokens = usage.totalTokens,
     estimated = usage.estimated,
+    cachedInputTokens = usage.cachedInputTokens,
+    reasoningTokens = usage.reasoningTokens,
     durationMs = durationMs,
     success = success,
     createdAt = createdAt

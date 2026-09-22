@@ -26,6 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.KeyboardType
+import com.novelforge.app.presentation.common.PaperTopBar
 import com.novelforge.app.domain.model.CreativeConfig
 import com.novelforge.app.domain.model.MAX_CHAPTER_COUNT
 import com.novelforge.app.domain.model.MIN_CHAPTER_COUNT
@@ -166,9 +167,16 @@ fun CreativeSetupScreen(
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("完成创作设置", style = MaterialTheme.typography.headlineSmall)
-        Text("《${project.title}》", style = MaterialTheme.typography.titleMedium)
-        Text("带 * 的项目必须完成，未完成前不会创建大纲生成任务。")
+        PaperTopBar(
+            title = "创作设置",
+            subtitle = "《${project.title}》",
+            onBack = onBack
+        )
+        Text(
+            "带 * 的项目必须完成，未完成前不会创建大纲。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
 
         OutlinedTextField(
             value = premise,

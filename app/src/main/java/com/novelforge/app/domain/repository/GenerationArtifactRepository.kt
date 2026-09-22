@@ -9,6 +9,14 @@ import com.novelforge.app.domain.model.Project
 interface GenerationArtifactRepository {
     suspend fun saveOutlineAndProject(version: OutlineVersion, project: Project)
 
+    /** 落新版本的同时删除指定章节及其正文与任务，并回收孤儿提示词快照（单事务） */
+    suspend fun saveOutlineAndPrune(
+        version: OutlineVersion,
+        project: Project,
+        pruneOutlineItemIds: Collection<String>,
+        pruneJobTargetIds: Collection<String>
+    )
+
     suspend fun saveOutlineResult(
         version: OutlineVersion,
         project: Project,

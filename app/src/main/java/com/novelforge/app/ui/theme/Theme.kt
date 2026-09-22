@@ -1,11 +1,14 @@
 package com.novelforge.app.ui.theme
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Typography
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
@@ -81,23 +84,36 @@ private val DarkColors = darkColorScheme(
 @Composable
 fun NovelForgeTheme(
     darkTheme: Boolean = false,
+    wallpaper: ImageBitmap? = null,
+    wallpaperDim: Float = 0.62f,
     content: @Composable () -> Unit
 ) {
     val colors = if (darkTheme) DarkColors else LightColors
+    val scrim = wallpaperDim.coerceIn(0.35f, 0.9f)
 
     CompositionLocalProvider(LocalNovelForgeDark provides darkTheme) {
         MaterialTheme(colorScheme = colors, typography = PaperTypography) {
-            Surface(
-                modifier = Modifier.fillMaxSize(),
-                color = colors.background,
-                contentColor = colors.onBackground
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .systemBarsPadding(),
+            Box(modifier = Modifier.fillMaxSize()) {
+                if (wallpaper != null) {
+                    Image(
+                        bitmap = wallpaper,
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
+                }
+                Surface(
+                    modifier = Modifier.fillMaxSize(),
+                    color = if (wallpaper != null) colors.background.copy(alpha = scrim) else colors.background,
+                    contentColor = colors.onBackground
                 ) {
-                    content()
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .systemBarsPadding(),
+                    ) {
+                        content()
+                    }
                 }
             }
         }

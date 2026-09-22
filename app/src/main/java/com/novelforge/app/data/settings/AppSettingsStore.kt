@@ -3,10 +3,12 @@ package com.novelforge.app.data.settings
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
 
 private val Context.appSettingsDataStore by preferencesDataStore(name = "app_settings")
@@ -20,13 +22,17 @@ data class AppSettings(
     val disableThinking: Boolean = true,
     val autoRunEnabled: Boolean = false,
     /** 主题模式：system / light / dark */
-    val themeMode: String = "system"
+    val themeMode: String = "system",
+    /** 空字符串表示不使用自定义壁纸 */
+    val wallpaperFileName: String = "",
+    /** 壁纸上的纸色遮罩，0–100，越大字越清楚 */
+    val wallpaperDim: Int = 62
 )
 
 class AppSettingsStore(private val context: Context) {
-    val settings: Flow<AppSettings> = context.appSettingsDataStore.data.map { preferences ->
-        readSettings(preferences)
-    }
+    val settings: Flow<AppSettings> = context.appSettingsDataStore.data
+        .catch { emit(emptyPreferences()) }
+        .map { preferences -> readSettings(preferences) }
 
     suspend fun update(transform: (AppSettings) -> AppSettings) {
         context.appSettingsDataStore.edit { preferences ->
@@ -39,6 +45,8 @@ class AppSettingsStore(private val context: Context) {
             preferences[DISABLE_THINKING] = next.disableThinking
             preferences[AUTO_RUN_ENABLED] = next.autoRunEnabled
             preferences[THEME_MODE] = next.themeMode
+            preferences[WALLPAPER_FILE] = next.wallpaperFileName
+            preferences[WALLPAPER_DIM] = next.wallpaperDim
         }
     }
 
@@ -52,7 +60,9 @@ class AppSettingsStore(private val context: Context) {
         costConfirmationEnabled = preferences[COST_CONFIRMATION] ?: true,
         disableThinking = preferences[DISABLE_THINKING] ?: true,
         autoRunEnabled = preferences[AUTO_RUN_ENABLED] ?: false,
-        themeMode = preferences[THEME_MODE] ?: "system"
+        themeMode = preferences[THEME_MODE] ?: "system",
+        wallpaperFileName = preferences[WALLPAPER_FILE].orEmpty(),
+        wallpaperDim = (preferences[WALLPAPER_DIM] ?: 62).coerceIn(35, 90)
     )
 
     private companion object {
@@ -64,5 +74,7 @@ class AppSettingsStore(private val context: Context) {
         val DISABLE_THINKING = booleanPreferencesKey("disable_thinking")
         val AUTO_RUN_ENABLED = booleanPreferencesKey("auto_run_enabled")
         val THEME_MODE = stringPreferencesKey("theme_mode")
+        val WALLPAPER_FILE = stringPreferencesKey("wallpaper_file")
+        val WALLPAPER_DIM = intPreferencesKey("wallpaper_dim")
     }
 }

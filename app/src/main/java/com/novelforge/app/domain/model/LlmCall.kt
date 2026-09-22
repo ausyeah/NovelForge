@@ -17,7 +17,11 @@ data class LlmUsage(
     val inputTokens: Long? = null,
     val outputTokens: Long? = null,
     val totalTokens: Long? = null,
-    val estimated: Boolean = false
+    val estimated: Boolean = false,
+    /** 命中缓存的输入 token（计费按折扣价，单列出来才能算净输入） */
+    val cachedInputTokens: Long? = null,
+    /** 思考/推理链消耗的 output token（含在 outputTokens 里） */
+    val reasoningTokens: Long? = null
 )
 
 @Serializable

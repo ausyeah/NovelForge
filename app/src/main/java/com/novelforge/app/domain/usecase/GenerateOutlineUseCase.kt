@@ -131,12 +131,13 @@ class GenerateOutlineUseCase(
         val batchStart = chapterNumber.coerceIn(1, chapterCount)
         val batchEnd = minOf(batchStart + OUTLINE_BATCH_SIZE - 1, chapterCount)
         val batchCount = batchEnd - batchStart + 1
-        val rangeLabel = if (batchStart == batchEnd) "第 $batchStart 章" else "第 $batchStart 至 $batchEnd 章"
+        val rangeLabel = if (batchStart == batchEnd) com.novelforge.app.presentation.common.chapterLabel(batchStart - 1)
+            else "${com.novelforge.app.presentation.common.chapterLabel(batchStart - 1)} 至 ${com.novelforge.app.presentation.common.chapterLabel(batchEnd - 1)}"
         val genreTags = creativeConfig.genreTags.joinToString("、").ifBlank { "未指定" }
         val previousContext = previousChapters
             .takeLast(PREVIOUS_CONTEXT_LIMIT)
             .joinToString("\n") { item ->
-                "第 ${item.orderIndex + 1} 章《${item.title}》：${item.summary}"
+                "${com.novelforge.app.presentation.common.chapterLabel(item.orderIndex)}《${item.title}》：${item.summary}"
             }
             .ifBlank { "暂无前文大纲" }
         val prologueNote = if (batchStart == 1) {

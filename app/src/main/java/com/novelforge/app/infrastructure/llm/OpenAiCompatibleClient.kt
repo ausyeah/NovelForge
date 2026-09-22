@@ -369,11 +369,18 @@ class OpenAiCompatibleClient(
 
     private fun parseUsage(usage: JsonObject): LlmUsage {
         fun number(name: String): Long? = usage[name]?.jsonPrimitive?.longOrNull
+        val details = usage["completion_tokens_details"]?.jsonObject
+        val promptDetails = usage["input_tokens_details"]?.jsonObject ?: usage["prompt_tokens_details"]?.jsonObject
         return LlmUsage(
             inputTokens = number("prompt_tokens") ?: number("input_tokens"),
             outputTokens = number("completion_tokens") ?: number("output_tokens"),
             totalTokens = number("total_tokens"),
-            estimated = false
+            estimated = false,
+            cachedInputTokens = number("prompt_cache_hit_tokens")
+                ?: number("cached_tokens")
+                ?: promptDetails?.let { d -> d["cached_tokens"]?.jsonPrimitive?.longOrNull },
+            reasoningTokens = details?.let { d -> d["reasoning_tokens"]?.jsonPrimitive?.longOrNull }
+                ?: number("reasoning_tokens")
         )
     }
 

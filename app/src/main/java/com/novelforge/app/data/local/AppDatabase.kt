@@ -14,7 +14,7 @@ import androidx.room.RoomDatabase
         LlmCallEntity::class,
         QualityRunEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {

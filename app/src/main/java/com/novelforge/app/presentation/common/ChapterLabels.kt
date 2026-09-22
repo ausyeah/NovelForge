@@ -1,6 +1,7 @@
 package com.novelforge.app.presentation.common
 
-/** 章节展示名：全书第 1 个推进段是引子，之后按正文第 1、2、… 章计 */
+/** 章节展示名（编号唯一权威）：全书第 1 个推进段是引子，之后按正文第 1、2、… 章计；
+ *  全 App（界面/导出/提示词/通知）都用它，禁止各处再自行 orderIndex+1 */
 fun chapterLabel(orderIndex: Int): String =
     if (orderIndex <= 0) "引子" else "第 $orderIndex 章"
 

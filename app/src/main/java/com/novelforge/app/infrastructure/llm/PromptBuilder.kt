@@ -46,7 +46,8 @@ class PromptBuilder(
         val previousTail = context.previousTail?.takeLastByCodePoint(budget.inputBudget / 3)
         val feedback = context.userFeedback?.takeLastByCodePoint(budget.inputBudget / 10)
         val userPrompt = buildString {
-            appendLine("请创作大纲项 ${chapter.id}，显示序号 ${chapter.orderIndex}：${chapter.title}")
+            appendLine("请创作《${com.novelforge.app.presentation.common.chapterLabel(chapter.orderIndex)}》：${chapter.title}")
+            appendLine("正文开头不要重复书写章节标题或编号，直接进入正文内容。")
             appendLine("【本章概要】${chapter.summary}")
             appendLine("【角色变化】${chapter.characterChanges.orEmpty()}")
             appendLine("【连续性状态】${json.encodeToString(context.continuityState)}")

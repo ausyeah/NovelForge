@@ -28,7 +28,8 @@ class GenerationRecoveryTest {
     @Test
     fun createOrReuseJob_isIdempotentForSameRequest() = runBlocking {
         val repository = FakeGenerationRepository()
-        val coordinator = GenerationCoordinator(repository, FakeLlmClient())
+        var fakeNow = 0L
+        val coordinator = GenerationCoordinator(repository, FakeLlmClient(), now = { fakeNow += 3_000L; fakeNow })
 
         val first = coordinator.createOrReuseJob(
             projectId = "project-1",
@@ -62,7 +63,8 @@ class GenerationRecoveryTest {
             updatedAt = 1L
         )
         repository.jobs[job.id] = job
-        val coordinator = GenerationCoordinator(repository, FakeLlmClient())
+        var fakeNow = 0L
+        val coordinator = GenerationCoordinator(repository, FakeLlmClient(), now = { fakeNow += 3_000L; fakeNow })
 
         val events = coordinator.execute("job-1", testRequest()).toList()
 
@@ -84,7 +86,8 @@ class GenerationRecoveryTest {
             updatedAt = 1L
         )
         repository.jobs[job.id] = job
-        val coordinator = GenerationCoordinator(repository, FakeLlmClient())
+        var fakeNow = 0L
+        val coordinator = GenerationCoordinator(repository, FakeLlmClient(), now = { fakeNow += 3_000L; fakeNow })
 
         coordinator.execute("job-1", testRequest()).toList()
 
@@ -105,7 +108,8 @@ class GenerationRecoveryTest {
             updatedAt = 1L
         )
         repository.jobs[job.id] = job
-        val coordinator = GenerationCoordinator(repository, FakeLlmClient())
+        var fakeNow = 0L
+        val coordinator = GenerationCoordinator(repository, FakeLlmClient(), now = { fakeNow += 3_000L; fakeNow })
 
         coordinator.execute(
             job.id,
@@ -169,6 +173,19 @@ class GenerationRecoveryTest {
         override suspend fun findJobsWithStatuses(statuses: Collection<String>): List<GenerationJob> =
             jobs.values.filter { it.status.name in statuses }
 
+        override suspend fun updateJobIfNotCancelled(job: GenerationJob): Boolean {
+            if (jobs[job.id]?.status == GenerationJobStatus.CANCELLED) return false
+            jobs[job.id] = job
+            states[job.id]?.value = job
+            updates.add(job)
+            return true
+        }
+        override suspend fun deleteAllJobs(projectId: String) {
+            jobs.keys.filter { jobs[it]?.projectId == projectId }.forEach { key ->
+                states[key]?.value = null
+                jobs.remove(key)
+            }
+        }
         override suspend fun deleteJobsForTargets(
             projectId: String,
             purpose: String,

@@ -96,7 +96,7 @@ class GenerationUseCaseTest {
         )
 
         val prompt = queued.request.messages.first { it.role == ChatRole.USER }.content
-        assertTrue(prompt.contains("整理全书故事线中第 1 至 6 章（共 6 个连续推进段）"))
+        assertTrue(prompt.contains("整理全书故事线中引子 至 第 5 章（共 6 个连续推进段）"))
         assertTrue(prompt.contains("后续生成正文时使用的故事资料"))
         assertTrue(!prompt.contains("80-180 字"))
         assertTrue(prompt.contains("不要提供 id、orderIndex 或 characterChanges"))
@@ -149,7 +149,7 @@ class GenerationUseCaseTest {
         )
 
         val prompt = queued.request.messages.last().content
-        assertTrue(prompt.contains("整理全书故事线中第 1 至 10 章（共 10 个连续推进段）"))
+        assertTrue(prompt.contains("整理全书故事线中引子 至 第 9 章（共 10 个连续推进段）"))
         assertTrue(!prompt.contains("至少 150 个章节"))
         assertTrue(prompt.contains("冷峻克制"))
         assertTrue(prompt.contains("每 5 章一次大高潮"))
@@ -187,7 +187,7 @@ class GenerationUseCaseTest {
             previousChapters = emptyList()
         ).messages.last().content
 
-        assertTrue(prompt.contains("整理全书故事线中第 41 至 50 章（共 10 个连续推进段）"))
+        assertTrue(prompt.contains("整理全书故事线中第 40 章 至 第 49 章（共 10 个连续推进段）"))
         assertTrue(prompt.contains("严禁生成批次之外的章节"))
         assertTrue(!prompt.contains("第 51 章"))
         assertTrue(!prompt.contains("至少生成"))
@@ -225,6 +225,14 @@ class GenerationUseCaseTest {
 
         override suspend fun countJobs(projectId: String, purpose: String, targetId: String): Int = 0
         override suspend fun findJobsWithStatuses(statuses: Collection<String>): List<GenerationJob> = emptyList()
+        override suspend fun updateJobIfNotCancelled(job: GenerationJob): Boolean {
+            if (created?.id == job.id && created?.status == com.novelforge.app.domain.model.GenerationJobStatus.CANCELLED) return false
+            created = job
+            return true
+        }
+        override suspend fun deleteAllJobs(projectId: String) {
+            if (created?.projectId == projectId) created = null
+        }
         override suspend fun deleteJobsForTargets(
             projectId: String,
             purpose: String,

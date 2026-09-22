@@ -1,21 +1,32 @@
 package com.novelforge.app.data.repository
 
+import androidx.room.withTransaction
+import com.novelforge.app.data.local.AppDatabase
 import com.novelforge.app.data.local.GenerationJobDao
+import com.novelforge.app.data.local.orFallback
 import com.novelforge.app.data.local.toDomain
 import com.novelforge.app.data.local.toEntity
 import com.novelforge.app.domain.model.GenerationJob
+import com.novelforge.app.domain.model.GenerationJobStatus
 import com.novelforge.app.domain.repository.GenerationRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 
-class RoomGenerationRepository(private val dao: GenerationJobDao) : GenerationRepository {
-    override fun observeJob(id: String): Flow<GenerationJob?> = dao.observeById(id).map { it?.toDomain() }
+class RoomGenerationRepository(
+    private val dao: GenerationJobDao,
+    private val database: AppDatabase
+) : GenerationRepository {
+    override fun observeJob(id: String): Flow<GenerationJob?> =
+        dao.observeById(id).map { it?.toDomain() }.flowOn(Dispatchers.Default).orFallback(null)
 
     override fun observeLatestJob(
         projectId: String,
         purpose: String,
         @Suppress("UNUSED_PARAMETER") targetId: String?
-    ): Flow<GenerationJob?> = dao.observeLatest(projectId, purpose).map { it?.toDomain() }
+    ): Flow<GenerationJob?> =
+        dao.observeLatest(projectId, purpose).map { it?.toDomain() }.flowOn(Dispatchers.Default).orFallback(null)
 
     override suspend fun findById(id: String): GenerationJob? = dao.findById(id)?.toDomain()
 
@@ -41,6 +52,18 @@ class RoomGenerationRepository(private val dao: GenerationJobDao) : GenerationRe
 
     override suspend fun updateJob(job: GenerationJob) {
         dao.upsert(job.toEntity())
+    }
+
+    override suspend fun updateJobIfNotCancelled(job: GenerationJob): Boolean =
+        database.withTransaction {
+            val current = dao.findById(job.id) ?: return@withTransaction false
+            if (current.status == GenerationJobStatus.CANCELLED.name) return@withTransaction false
+            dao.upsert(job.toEntity())
+            true
+        }
+
+    override suspend fun deleteAllJobs(projectId: String) {
+        dao.deleteForProject(projectId)
     }
 
     override suspend fun deleteJobsForTargets(

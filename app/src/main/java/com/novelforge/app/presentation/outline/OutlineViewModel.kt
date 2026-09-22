@@ -42,16 +42,17 @@ class OutlineViewModel(
     private val generationArtifactRepository: GenerationArtifactRepository,
     private val generationRuntime: GenerationRuntime
 ) : ViewModel() {
-    val versions: StateFlow<List<OutlineVersion>> = outlineRepository.observeVersions(projectId).stateIn(
+    /** 只看最新版本：全版本历史流在 300+ 章规模下解析代价是 O(N²)，砍掉 */
+    val outline: StateFlow<OutlineVersion?> = outlineRepository.observeLatestVersion(projectId).stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),
-        emptyList()
+        null
     )
 
     /** 已保存正文的章节 id 集合（总览卡片颜色区分用） */
     val writtenChapterIds: StateFlow<Set<String>> = chapterRepository
-        .observeRevisions(projectId)
-        .map { revisions -> revisions.map { it.outlineItemId }.toSet() }
+        .observeWrittenItemIds(projectId)
+        .map { it.toSet() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
 
     private val activeJobId = MutableStateFlow<String?>(null)
@@ -73,7 +74,10 @@ class OutlineViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     fun setAutoRun(enabled: Boolean) {
-        viewModelScope.launch { generationRuntime.setAutoRun(enabled) }
+        viewModelScope.launch {
+            runCatching { generationRuntime.setAutoRun(enabled) }
+                .onFailure { _error.value = it.message ?: "无法切换全自动" }
+        }
     }
 
     /** 一键全自动：打开开关并从当前进度直接开跑 */
@@ -92,11 +96,13 @@ class OutlineViewModel(
 
     init {
         viewModelScope.launch {
-            activeJobId.value = generationRepository.findLatestJob(
-                projectId,
-                GenerationPurpose.OUTLINE.name,
-                null
-            )?.id
+            runCatching {
+                activeJobId.value = generationRepository.findLatestJob(
+                    projectId,
+                    GenerationPurpose.OUTLINE.name,
+                    null
+                )?.id
+            }.onFailure { _error.value = "大纲进度读取失败" }
         }
     }
 
@@ -179,19 +185,19 @@ class OutlineViewModel(
 
     fun cancel() {
         val jobId = activeJob.value?.id ?: return
-        viewModelScope.launch { generationRuntime.cancel(jobId) }
+        viewModelScope.launch { runCatching { generationRuntime.cancel(jobId) } }
     }
 
     fun saveEditedItems(items: List<OutlineItem>) {
-        val current = versions.value.firstOrNull() ?: return
-        val normalized = items.mapIndexed { index, item -> item.copy(orderIndex = index) }
-        if (normalized == current.chapters) return
+        val current = outline.value ?: return
+        // 保留原 orderIndex（删章留洞是铁律）：压平重排会让全书编号错位、续读跳错章
+        if (items == current.chapters) return
         viewModelScope.launch {
             runCatching {
                 val next = current.copy(
                     id = UUID.randomUUID().toString(),
                     version = current.version + 1,
-                    chapters = normalized,
+                    chapters = items,
                     diffSummary = "用户编辑大纲",
                     createdAt = System.currentTimeMillis()
                 )
@@ -205,6 +211,12 @@ class OutlineViewModel(
                             updatedAt = System.currentTimeMillis()
                         )
                     )
+                }
+                // 被移出大纲的章节同步删正文，杜绝"幽灵已写"计数与 id 复用串书
+                val keptIds = items.map { it.id }.toSet()
+                val removedIds = current.chapters.map { it.id }.filter { it !in keptIds }
+                if (removedIds.isNotEmpty()) {
+                    chapterRepository.deleteRevisionsForItems(projectId, removedIds)
                 }
             }.onFailure { _error.value = it.message ?: "保存大纲失败" }
         }
@@ -221,7 +233,7 @@ class OutlineViewModel(
             }
             is JsonValidationResult.Success -> viewModelScope.launch {
                 runCatching {
-                    val current = versions.value.firstOrNull()
+                    val current = outline.value
                     val normalized = result.value.mapIndexed { index, item ->
                         item.copy(orderIndex = index)
                     }

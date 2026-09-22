@@ -40,7 +40,11 @@ data class ContinuityState(
     val characterStates: List<String> = emptyList(),
     val timelineEvents: List<String> = emptyList(),
     val unresolvedThreads: List<String> = emptyList(),
-    val factsWithSources: List<ContinuityFact> = emptyList()
+    val factsWithSources: List<ContinuityFact> = emptyList(),
+    /** 作家维护的角色档案。旧备份没有这个字段时按空列表读。 */
+    val characters: List<CharacterProfile> = emptyList(),
+    /** 章后抽出、尚未确认的记忆。确认前不进入下一章。 */
+    val pendingFacts: List<ContinuityFact> = emptyList()
 )
 
 @Serializable
@@ -49,5 +53,7 @@ data class ContinuityFact(
     val statement: String,
     val sourceChapterId: String?,
     val confirmed: Boolean = true,
-    val updatedAt: Long
+    val updatedAt: Long,
+    /** fact / thread / resolved。旧数据缺字段时当作已确认事实。 */
+    val kind: String = "fact"
 )

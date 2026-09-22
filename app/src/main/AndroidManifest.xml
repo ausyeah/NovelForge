@@ -25,6 +25,18 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- 禁用 WorkManager 默认初始化：自定义 WorkerFactory 必须在进程启动前就位，
+             由 NovelForgeApplication.onCreate 手动 WorkManager.initialize -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+        </provider>
         <!-- 生成任务以前台服务运行：用户划掉应用时进程不会被杀，生成不中断 -->
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"

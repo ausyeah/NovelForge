@@ -17,7 +17,13 @@ import kotlinx.coroutines.flow.flow
 sealed interface GenerationEvent {
     data class Status(val status: GenerationJobStatus) : GenerationEvent
     data class Delta(val text: String) : GenerationEvent
-    data class Usage(val inputTokens: Long?, val outputTokens: Long?, val estimated: Boolean) : GenerationEvent
+    data class Usage(
+        val inputTokens: Long?,
+        val outputTokens: Long?,
+        val estimated: Boolean,
+        val cachedInputTokens: Long? = null,
+        val reasoningTokens: Long? = null
+    ) : GenerationEvent
     data class Completed(val content: String, val finishReason: String?) : GenerationEvent
 }
 
@@ -75,21 +81,18 @@ class GenerationCoordinator(
         var finishReason: String? = null
         var lastCheckpointLength = content.length
         var lastCheckpointAt = running.lastCheckpointAt ?: running.updatedAt
-        var hasCheckpointedStreamContent = false
         try {
             llmClient.streamChat(request).collect { event ->
                 currentCoroutineContext().ensureActive()
                 when (event) {
                     is StreamEvent.Delta -> {
                         content.append(event.text)
-                        emit(GenerationEvent.Delta(event.text))
                         val currentTime = now()
                         val hasNewContent = content.length > lastCheckpointLength
-                        val checkpointDue = hasNewContent && (
-                            !hasCheckpointedStreamContent ||
-                                content.length - lastCheckpointLength >= CHECKPOINT_CHARS ||
-                                currentTime - lastCheckpointAt >= CHECKPOINT_INTERVAL_MS
-                            )
+                        // 纯时间基节流：checkpoint 是整行重写 + Room 表失效风暴，
+                        // 400ms 一次在超长篇下把主线程压满；2 秒足够断点恢复用
+                        val checkpointDue = hasNewContent &&
+                            currentTime - lastCheckpointAt >= CHECKPOINT_INTERVAL_MS
                         if (checkpointDue) {
                             // A checkpoint is still live output. Keep it RUNNING;
                             // RECOVERABLE_PARTIAL is reserved for an interrupted
@@ -101,7 +104,6 @@ class GenerationCoordinator(
                             )
                             lastCheckpointLength = content.length
                             lastCheckpointAt = currentTime
-                            hasCheckpointedStreamContent = true
                         }
                     }
                     is StreamEvent.Usage -> emit(
@@ -162,7 +164,7 @@ class GenerationCoordinator(
                 lastCheckpointAt = now(),
                 updatedAt = now()
             )
-            generationRepository.updateJob(failed)
+            generationRepository.updateJobIfNotCancelled(failed)
             throw error
         }
     }
@@ -179,7 +181,7 @@ class GenerationCoordinator(
         content: String,
         status: GenerationJobStatus = GenerationJobStatus.RECOVERABLE_PARTIAL
     ) {
-        generationRepository.updateJob(
+        generationRepository.updateJobIfNotCancelled(
             job.copy(
                 status = status,
                 partialContent = content,
@@ -195,7 +197,6 @@ class GenerationCoordinator(
     private suspend fun GenerationRepository.getRequired(id: String): GenerationJob? = findById(id)
 
     companion object {
-        private const val CHECKPOINT_CHARS = 100
-        private const val CHECKPOINT_INTERVAL_MS = 400L
+        private const val CHECKPOINT_INTERVAL_MS = 2_000L
     }
 }

@@ -6,6 +6,8 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -15,6 +17,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
@@ -31,6 +34,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.novelforge.app.presentation.common.PaperTopBar
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -132,6 +137,43 @@ fun ExportsScreen(onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
     var files by remember { mutableStateOf<List<ExportedTxt>?>(null) }
     var viewing by remember { mutableStateOf<Pair<ExportedTxt, String>?>(null) }
+    val app = com.novelforge.app.infrastructure.backup.NovelForgeRefs.application
+    val projects by app.projectRepository.observeProjects()
+        .collectAsStateWithLifecycle(initialValue = emptyList())
+    var pickBackupProject by remember { mutableStateOf(false) }
+    var backupMessage by remember { mutableStateOf<String?>(null) }
+    // SAF 选择期间 Activity 可能被回收，remember 会丢：挂到进程级对象上
+    var pendingBackupProjectId by BackupPendingStore::projectId
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri: Uri? ->
+        val wantedId = pendingBackupProjectId
+        pendingBackupProjectId = null
+        val target = projects.firstOrNull { it.id == wantedId }
+        if (uri != null && target != null) {
+            scope.launch {
+                backupMessage = runCatching {
+                    context.contentResolver.openOutputStream(uri)?.use { stream ->
+                        app.backupStore.export(target.id, stream)
+                    } ?: error("无法写入所选文件")
+                    "已导出《${target.title}》完整备份（大纲 + 全部正文）"
+                }.getOrElse { "导出失败：${it.message}" }
+            }
+        }
+    }
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            scope.launch {
+                backupMessage = runCatching {
+                    val imported = context.contentResolver.openInputStream(uri)
+                        ?.use { app.backupStore.import(it) } ?: error("无法读取所选文件")
+                    "已导入为新书《${imported.title}》，回书架或项目列表可见"
+                }.getOrElse { "导入失败：${it.message}" }
+            }
+        }
+    }
 
     fun refresh() {
         scope.launch {
@@ -150,15 +192,68 @@ fun ExportsScreen(onBack: () -> Unit) {
     ) {
         val current = viewing
         if (current == null) {
-            Text("导出文件", style = MaterialTheme.typography.headlineSmall)
+            PaperTopBar(title = "备份与导出", subtitle = "不含 API Key", onBack = onBack)
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("整书备份（JSON）", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "备份包含项目设定、全部大纲版本和全部正文修订，可换机/重装后导入恢复；不含 API Key。",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    backupMessage?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { pickBackupProject = true },
+                            modifier = Modifier.weight(1f),
+                            enabled = projects.isNotEmpty()
+                        ) { Text("导出备份") }
+                        OutlinedButton(
+                            onClick = { importLauncher.launch(arrayOf("application/json")) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text("导入备份") }
+                    }
+                }
+            }
+            if (pickBackupProject) {
+                AlertDialog(
+                    onDismissRequest = { pickBackupProject = false },
+                    title = { Text("选择要导出的书") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            projects.forEach { project ->
+                                TextButton(onClick = {
+                                    pickBackupProject = false
+                                    pendingBackupProjectId = project.id
+                                    exportLauncher.launch(
+                                        app.backupStore.suggestedFileName(project.title)
+                                    )
+                                }) { Text("《${project.title}》") }
+                            }
+                        }
+                    },
+                    confirmButton = {},
+                    dismissButton = {
+                        TextButton(onClick = { pickBackupProject = false }) { Text("取消") }
+                    }
+                )
+            }
             Text(
                 "TXT 保存在手机「下载/NovelForge/」文件夹，可离线直接查看。",
                 style = MaterialTheme.typography.bodySmall
             )
             when (val list = files) {
-                null -> Text("正在加载…")
+                null -> Text("正在加载…", style = MaterialTheme.typography.bodySmall)
                 emptyList<ExportedTxt>() -> Text(
-                    "还没有导出文件。\n在章节工作台点「保存到文件夹」后，会出现在这里。"
+                    "还没有 TXT。在章节页点「保存到文件夹」后，会出现在这里。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 else -> {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -203,12 +298,9 @@ fun ExportsScreen(onBack: () -> Unit) {
                     }
                 }
             }
-            Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-                Text("返回")
-            }
         } else {
             val (file, content) = current
-            Text(file.displayName, style = MaterialTheme.typography.titleMedium)
+            PaperTopBar(title = file.displayName, onBack = { viewing = null })
             Text(
                 content,
                 modifier = Modifier
@@ -227,11 +319,12 @@ fun ExportsScreen(onBack: () -> Unit) {
                     modifier = Modifier.weight(1f)
                 ) { Text("分享") }
             }
-            Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-                Text("返回主页")
-            }
         }
     }
+}
+
+private object BackupPendingStore {
+    var projectId: String? = null
 }
 
 private fun formatSize(bytes: Long): String = when {
@@ -241,3 +334,4 @@ private fun formatSize(bytes: Long): String = when {
 
 private fun formatTime(seconds: Long): String =
     SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(seconds * 1000))
+

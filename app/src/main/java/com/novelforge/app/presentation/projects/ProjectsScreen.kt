@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -23,10 +22,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.novelforge.app.domain.model.Project
 import com.novelforge.app.domain.model.label
+import com.novelforge.app.presentation.common.PaperTopBar
+import com.novelforge.app.presentation.common.StatusChip
+import com.novelforge.app.presentation.common.formatUpdatedAgo
+import com.novelforge.app.ui.theme.PaperButton
+import com.novelforge.app.ui.theme.PaperSurface
 
 private enum class ProjectDialog {
     MENU,
@@ -59,61 +62,67 @@ fun ProjectsScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+            .padding(horizontal = 20.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextButton(onClick = onBack) { Text("〈 返回") }
-            Text(
-                "我的项目",
-                modifier = Modifier.fillMaxWidth(),
-                textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.titleMedium
-            )
-        }
+        PaperTopBar(title = "全部项目", subtitle = "${projects.size} 本", onBack = onBack)
 
         if (projects.isEmpty()) {
             Column(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                Text("还没有项目，从新建一个开始。")
-                TextButton(onClick = onCreateProject, modifier = Modifier.padding(top = 8.dp)) {
-                    Text("新建项目")
-                }
+                Text("还没有作品", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "先起一个名字，题材和大纲可以下一步再定。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 6.dp, bottom = 16.dp)
+                )
+                PaperButton("写第一本", onCreateProject, accent = true)
             }
         } else {
+            Text(
+                "点进作品继续写，长按可以重命名或删除。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
             LazyColumn(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 items(projects, key = { it.id }) { project ->
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .combinedClickable(
-                                onClick = { onOpenProject(project) },
-                                onLongClick = {
-                                    selectedProject = project
-                                    dialog = ProjectDialog.MENU
-                                }
-                            )
-                    ) {
-                        Column(modifier = Modifier.padding(16.dp)) {
+                    PaperSurface(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .combinedClickable(
+                                    onClick = { onOpenProject(project) },
+                                    onLongClick = {
+                                        selectedProject = project
+                                        dialog = ProjectDialog.MENU
+                                    }
+                                )
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             Text(project.title, style = MaterialTheme.typography.titleMedium)
-                            Text(
-                                "状态：${project.status.label()}",
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(top = 4.dp)
-                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                StatusChip(project.status.label())
+                                Text(
+                                    formatUpdatedAgo(project.updatedAt),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
                         }
                     }
                 }
             }
+            PaperButton("新建一本", onCreateProject, modifier = Modifier.fillMaxWidth(), accent = true)
         }
     }
 

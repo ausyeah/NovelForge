@@ -7,7 +7,8 @@ enum class GenerationPurpose {
     OUTLINE,
     CHAPTER,
     QUALITY_CHECK,
-    REPAIR
+    REPAIR,
+    CHAT
 }
 
 @Serializable

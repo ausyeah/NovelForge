@@ -43,9 +43,8 @@ import com.novelforge.app.domain.model.GenerationJob
 import com.novelforge.app.domain.model.GenerationJobStatus
 import com.novelforge.app.domain.model.OutlineItem
 import com.novelforge.app.domain.model.OutlineVersion
-import com.novelforge.app.infrastructure.llm.JsonResponseValidator
-import com.novelforge.app.infrastructure.llm.JsonValidationResult
 import com.novelforge.app.presentation.common.GenerationStatusCard
+import com.novelforge.app.presentation.common.PaperTopBar
 import com.novelforge.app.presentation.common.chapterLabel
 
 /** 存在中间产出、允许“修复 / 重试”的任务状态 */
@@ -60,7 +59,7 @@ private val REPAIRABLE_STATUSES = setOf(
 @Composable
 fun OutlineScreen(
     projectTitle: String,
-    versions: List<OutlineVersion>,
+    outline: OutlineVersion?,
     job: GenerationJob?,
     chapterJob: GenerationJob?,
     writtenChapterIds: Set<String>,
@@ -80,22 +79,26 @@ fun OutlineScreen(
     onStopOptimize: () -> Unit = {},
     onConsumeWand: () -> Unit = {},
     onRegenerateFrom: (OutlineItem) -> Unit = {},
-    plannedChapterCount: Int? = null
+    plannedChapterCount: Int? = null,
+    onOpenMemory: () -> Unit = {}
 ) {
-    val outline = versions.firstOrNull()
-    val validator = remember { JsonResponseValidator() }
+    // 进度计数不做全量 JSON 解析：checkpoint 每 2 秒触发一次，335 章 blob 解析会卡主线程
     val savedChapterCount = remember(job?.partialContent) {
-        when (val result = job?.partialContent?.takeIf(String::isNotBlank)?.let(validator::parseOutline)) {
-            is JsonValidationResult.Success -> result.value.size
-            else -> 0
+        val text = job?.partialContent.orEmpty()
+        var count = 0
+        var idx = text.indexOf("orderIndex")
+        while (idx >= 0) {
+            count++
+            idx = text.indexOf("orderIndex", idx + 10)
         }
+        count
     }
     val chapterProgress = if (
         job?.status == GenerationJobStatus.RUNNING || job?.status == GenerationJobStatus.QUEUED
     ) {
         plannedChapterCount?.let { total ->
-            val currentChapter = (savedChapterCount + 1).coerceAtMost(total.coerceAtLeast(1))
-            "正在生成本批大纲（第 $currentChapter 章起） · 已生成 $savedChapterCount/$total 章"
+            val currentChapter = chapterLabel(savedChapterCount)
+            "正在生成本批大纲（$currentChapter 起） · 已生成 $savedChapterCount/$total 段"
         }
     } else {
         null
@@ -113,17 +116,21 @@ fun OutlineScreen(
     // 魔法棒撤回槽：itemId -> 优化前原条目；用户再手动编辑该章即作废
     var undoSlot by remember(outline?.id) { mutableStateOf<Pair<String, OutlineItem>?>(null) }
     var regenTarget by remember { mutableStateOf<OutlineItem?>(null) }
+    var reverseOrder by remember { mutableStateOf(true) }
     LaunchedEffect(wandResult) {
         val result = wandResult ?: return@LaunchedEffect
-        if (result.targetIndex in draftItems.indices &&
-            draftItems[result.targetIndex].id == result.optimized.id
-        ) {
-            draftItems = draftItems.mapIndexed { i, item ->
-                if (i == result.targetIndex) result.optimized else item
-            }
-            undoSlot = result.optimized.id to result.original
-        }
         onConsumeWand()
+        val live = draftItems.getOrNull(result.targetIndex)
+        if (live == null || live.id != result.original.id) return@LaunchedEffect
+        if (live.title != result.original.title || live.summary != result.original.summary) {
+            // 等待期间用户又手改了：AI 结果作废，绝不覆盖手打内容
+            fixHint = "润色结果已丢弃：等待期间你手动改过本章，保留的是你的版本"
+            return@LaunchedEffect
+        }
+        draftItems = draftItems.mapIndexed { i, item ->
+            if (i == result.targetIndex) result.optimized else item
+        }
+        undoSlot = result.optimized.id to result.original
     }
     val writtenCount = writtenChapterIds.size
     val imeVisible = WindowInsets.ime.getBottom(LocalDensity.current) > 0
@@ -135,11 +142,12 @@ fun OutlineScreen(
     val detailOpen = detailIndex != null
 
     val anyBusy = busy || chapterBusy
+    val nextFreeIndex = ((outline?.chapters?.maxOfOrNull { it.orderIndex } ?: -1) + 1)
     val isRegen = outline != null &&
-        outline.chapters.size >= (plannedChapterCount ?: outline.chapters.size)
+        nextFreeIndex >= (plannedChapterCount ?: nextFreeIndex)
     val generateLabel = when {
         outline == null -> "生成大纲"
-        !isRegen -> "继续生成大纲（第 ${outline.chapters.size + 1} 章起）"
+        !isRegen -> "继续生成大纲（${chapterLabel(nextFreeIndex)} 起）"
         else -> "重新生成大纲"
     }
     // 总览与详情共用的按钮组（详情模式下不渲染，一键全自动由详情页顶部提供）
@@ -199,24 +207,15 @@ fun OutlineScreen(
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                "《$projectTitle》大纲",
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
-            Text(
-                "全自动",
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(start = 8.dp)
-            )
-            Switch(checked = autoRun, onCheckedChange = onToggleAutoRun)
-        }
+        PaperTopBar(
+            title = "《$projectTitle》",
+            subtitle = "大纲",
+            trailing = {
+                TextButton(onClick = onOpenMemory) { Text("记忆") }
+                Text("全自动", style = MaterialTheme.typography.bodySmall)
+                Switch(checked = autoRun, onCheckedChange = onToggleAutoRun)
+            }
+        )
         // 状态卡跟随实际活动：正文任务在跑时显示正文进度，而不是大纲任务的 PAUSED
         val chapterBusyNow = chapterBusy
         val statusJob = if (chapterBusyNow) chapterJob else job
@@ -225,7 +224,7 @@ fun OutlineScreen(
             job = statusJob,
             progress = if (chapterBusyNow) {
                 val cj = chapterJob
-                val chapterTitle = versions.firstOrNull()?.chapters
+                val chapterTitle = outline?.chapters
                     ?.firstOrNull { it.id == cj?.targetId }?.title
                 "正在生成${chapterTitle?.let { "《$it》" } ?: "本章"}正文 · 已接收 ${cj.partialContent.length} 字符"
             } else {
@@ -292,7 +291,7 @@ fun OutlineScreen(
                     index = detailIndex!!,
                     modifier = Modifier.fillMaxWidth().weight(1f),
                     locked = detailItem != null && detailItem.id in writtenChapterIds,
-                    wandBusy = optimizingIndex == detailIndex,
+                    wandBusy = optimizingIndex != null,
                     canUndo = detailItem != null && undoSlot?.first == detailItem.id,
                     dirty = draftItems != outline.chapters,
                     anyBusy = anyBusy,
@@ -300,6 +299,7 @@ fun OutlineScreen(
                     onDetailClose = { detailIndex = null },
                     onWandToggle = { item, index ->
                         when {
+                            // 优化是全局单飞：不管当前停在第几章，按钮都得诚实显示"停止"
                             optimizingIndex != null -> onStopOptimize()
                             undoSlot?.first == item.id -> {
                                 val saved = undoSlot?.second
@@ -331,7 +331,18 @@ fun OutlineScreen(
                         .fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("版本 ${outline.version} · 共 ${draftItems.size} 章 · 点章节可编辑详情")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "版本 ${outline.version} · 共 ${draftItems.size} 章 · 点章节可编辑详情",
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { reverseOrder = !reverseOrder }) {
+                            Text(if (reverseOrder) "↓ 倒序中" else "↑ 正序中")
+                        }
+                    }
                     if (draftItems != outline.chapters) {
                         Text("有未保存的修改", style = MaterialTheme.typography.bodySmall)
                     }
@@ -339,7 +350,7 @@ fun OutlineScreen(
                         modifier = Modifier.fillMaxWidth(),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        items(draftItems, key = { it.id }) { item ->
+                        items(if (reverseOrder) draftItems.reversed() else draftItems, key = { it.id }) { item ->
                             val written = item.id in writtenChapterIds
                             Card(
                                 modifier = Modifier
@@ -366,7 +377,7 @@ fun OutlineScreen(
                                     ) {
                                         Text(
                                             // 魔法棒润色过的标题自带「第X章」，不再拼前缀避免重复
-                                            item.title.ifBlank { chapterLabel(item.orderIndex) },
+                                            "${chapterLabel(item.orderIndex)} ${item.title}",
                                             fontWeight = FontWeight.Bold,
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
@@ -508,7 +519,7 @@ private fun ChapterDetailPane(
                 Text("▶ 一键全自动生成全书（大纲 + 正文）")
             }
         }
-        Text(item.title.ifBlank { chapterLabel(item.orderIndex) }, fontWeight = FontWeight.Bold)
+        Text("${chapterLabel(item.orderIndex)} ${item.title}", fontWeight = FontWeight.Bold)
         if (locked) {
             Text(
                 "本章已生成正文：改大纲不会自动改正文；觉得写坏了用下方「从此章重生成」连正文一起重写",

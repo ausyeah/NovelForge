@@ -14,5 +14,8 @@ interface GenerationRepository {
     suspend fun findJobsWithStatuses(statuses: Collection<String>): List<GenerationJob>
     suspend fun createJob(job: GenerationJob): GenerationJob
     suspend fun updateJob(job: GenerationJob)
+    /** 用户已取消的任务不许被心跳/失败路径复活（整行 REPLACE 会吞掉 CANCELLED） */
+    suspend fun updateJobIfNotCancelled(job: GenerationJob): Boolean
+    suspend fun deleteAllJobs(projectId: String)
     suspend fun deleteJobsForTargets(projectId: String, purpose: String, targetIds: Collection<String>)
 }

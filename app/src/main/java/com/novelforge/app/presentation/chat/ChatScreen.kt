@@ -65,6 +65,7 @@ import com.novelforge.app.infrastructure.llm.LLMConnectionConfig
 import com.novelforge.app.infrastructure.llm.OpenAiCompatibleClient
 import com.novelforge.app.infrastructure.llm.ProviderCapabilities
 import com.novelforge.app.infrastructure.llm.StreamEvent
+import com.novelforge.app.presentation.common.PaperTopBar
 import com.novelforge.app.ui.theme.PaperButton
 import com.novelforge.app.ui.theme.PaperShape
 import com.novelforge.app.ui.theme.PaperSurface
@@ -98,7 +99,8 @@ class ChatViewModel(
     private val settingsStore: AppSettingsStore,
     private val apiKeyStore: ApiKeyStore,
     private val client: OpenAiCompatibleClient,
-    private val historyStore: ChatHistoryStore
+    private val historyStore: ChatHistoryStore,
+    private val llmCallRepository: com.novelforge.app.domain.repository.LlmCallRepository
 ) : ViewModel() {
     private val _messages = MutableStateFlow<List<UiChatMessage>>(emptyList())
     val messages: StateFlow<List<UiChatMessage>> = _messages.asStateFlow()
@@ -135,12 +137,15 @@ class ChatViewModel(
     }
 
     private fun flushPending() {
-        val r = pendingReasoning.toString()
-        val t = pendingText.toString()
+        // 冻结期间的 token 已通过 liveAppend 实时落账，这里只清缓冲防止双写
         pendingReasoning.setLength(0)
         pendingText.setLength(0)
-        if (r.isEmpty() && t.isEmpty()) return
-        appendToLast { m -> m.copy(reasoning = m.reasoning + r, text = m.text + t) }
+    }
+
+    /** 冻结期间也要"活着"：只更新最后一条消息的正文（原地刷新不改条数，不会顶跳视口） */
+    private fun liveAppend(reasoning: String, text: String) {
+        if (reasoning.isEmpty() && text.isEmpty()) return
+        appendToLast { m -> m.copy(reasoning = m.reasoning + reasoning, text = m.text + text) }
     }
 
     private fun appendToLast(transform: (UiChatMessage) -> UiChatMessage) {
@@ -207,7 +212,10 @@ class ChatViewModel(
                 UiChatMessage(ChatRole.ASSISTANT, "", streaming = true)
         }
         persistCurrent()
+        val startedAt = System.currentTimeMillis()
         streamJob = viewModelScope.launch {
+            var providerName: String? = null
+            var modelName: String? = null
             try {
                 val settings = settingsStore.settings.first()
                 val apiKey = apiKeyStore.read()
@@ -225,6 +233,8 @@ class ChatViewModel(
                     ),
                     disableThinking = false
                 )
+                providerName = settings.providerName
+                modelName = settings.model
                 val history = _messages.value
                     .dropLast(1)
                     .filter { it.text.isNotBlank() }
@@ -240,22 +250,33 @@ class ChatViewModel(
                     )
                 )
                 var received = false
+                var streamUsage: com.novelforge.app.domain.model.LlmUsage? = null
                 client.streamChat(request).collect { event ->
                     when (event) {
                         is StreamEvent.Reasoning -> {
                             received = true
-                            if (frozen) pendingReasoning.append(event.text)
-                            else appendToLast { m -> m.copy(reasoning = m.reasoning + event.text) }
+                            if (frozen) {
+                                pendingReasoning.append(event.text)
+                                liveAppend(event.text, "")
+                            } else {
+                                appendToLast { m -> m.copy(reasoning = m.reasoning + event.text) }
+                            }
                         }
                         is StreamEvent.Delta -> {
                             received = true
-                            if (frozen) pendingText.append(event.text)
-                            else appendToLast { m -> m.copy(text = m.text + event.text) }
+                            if (frozen) {
+                                pendingText.append(event.text)
+                                liveAppend("", event.text)
+                            } else {
+                                appendToLast { m -> m.copy(text = m.text + event.text) }
+                            }
                         }
+                        is StreamEvent.Usage -> streamUsage = event.usage
                         is StreamEvent.Finished -> Unit
                         else -> Unit
                     }
                 }
+                recordCall(settings.providerName, settings.model, startedAt, streamUsage, received)
                 if (!received) {
                     _messages.update { list ->
                         list.mapIndexed { index, m ->
@@ -281,6 +302,7 @@ class ChatViewModel(
                 }
                 throw ce
             } catch (e: Throwable) {
+                recordCall(providerName, modelName, startedAt, null, false)
                 _error.value = e.message ?: "请求失败"
                 _messages.update { list ->
                     list.mapIndexed { index, m ->
@@ -300,6 +322,34 @@ class ChatViewModel(
                     }
                 }
                 persistCurrent()
+            }
+        }
+    }
+
+    /** 对话调用也入账本（llm_calls）：失败/中断也记一条，token 拿不到就留空 */
+    private fun recordCall(
+        providerName: String?,
+        modelName: String?,
+        startedAt: Long,
+        usage: com.novelforge.app.domain.model.LlmUsage?,
+        success: Boolean
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                llmCallRepository.save(
+                    com.novelforge.app.domain.model.LlmCall(
+                        id = java.util.UUID.randomUUID().toString(),
+                        projectId = "",
+                        jobId = "chat-${System.currentTimeMillis()}",
+                        purpose = com.novelforge.app.domain.model.GenerationPurpose.CHAT,
+                        provider = providerName?.takeIf { it.isNotBlank() } ?: "未知",
+                        model = modelName?.takeIf { it.isNotBlank() } ?: "未知",
+                        usage = usage ?: com.novelforge.app.domain.model.LlmUsage(),
+                        durationMs = System.currentTimeMillis() - startedAt,
+                        success = success,
+                        createdAt = System.currentTimeMillis()
+                    )
+                )
             }
         }
     }
@@ -356,14 +406,16 @@ class ChatViewModel(
         private val settingsStore: AppSettingsStore,
         private val apiKeyStore: ApiKeyStore,
         private val client: OpenAiCompatibleClient,
-        private val historyStore: ChatHistoryStore
+        private val historyStore: ChatHistoryStore,
+        private val llmCallRepository: com.novelforge.app.domain.repository.LlmCallRepository
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T = ChatViewModel(
             settingsStore,
             apiKeyStore,
             client,
-            historyStore
+            historyStore,
+            llmCallRepository
         ) as T
     }
 }
@@ -417,28 +469,19 @@ fun ChatScreen(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        // 顶栏：返回 · 标题 · 历史 · 清空
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextButton(onClick = onBack) { Text("〈 返回") }
-            Text(
-                "小说灵感启发助手",
-                modifier = Modifier.weight(1f),
-                textAlign = TextAlign.Center,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            TextButton(onClick = { historyOpen = !historyOpen }) {
-                Text("历史")
+        PaperTopBar(
+            title = "灵感助手",
+            subtitle = "聊聊设定、段落和走向",
+            onBack = onBack,
+            trailing = {
+                TextButton(onClick = { historyOpen = !historyOpen }) {
+                    Text(if (historyOpen) "收起" else "历史")
+                }
+                TextButton(onClick = { viewModel.clear() }, enabled = messages.isNotEmpty()) {
+                    Text("清空")
+                }
             }
-            TextButton(onClick = { viewModel.clear() }, enabled = messages.isNotEmpty()) {
-                Text("清空")
-            }
-        }
+        )
 
         // 消息区（reverseLayout：最新消息贴底，增长时天然跟随）
         Box(

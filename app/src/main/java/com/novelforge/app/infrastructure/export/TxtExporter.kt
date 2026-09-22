@@ -34,7 +34,7 @@ class TxtExporter {
             writer.appendLine(title)
             writer.appendLine()
             chapters.sortedBy { it.orderIndex }.forEach { chapter ->
-                writer.appendLine("第${chapter.orderIndex + 1}章 ${chapter.title}")
+                writer.appendLine("${com.novelforge.app.presentation.common.chapterLabel(chapter.orderIndex)} ${chapter.title}")
                 writer.appendLine()
                 writer.appendLine(chapter.content)
                 writer.appendLine()

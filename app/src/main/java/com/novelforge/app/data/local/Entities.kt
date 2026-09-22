@@ -114,6 +114,8 @@ data class LlmCallEntity(
     val outputTokens: Long?,
     val totalTokens: Long?,
     val estimated: Boolean,
+    val cachedInputTokens: Long? = null,
+    val reasoningTokens: Long? = null,
     val durationMs: Long?,
     val success: Boolean,
     val createdAt: Long

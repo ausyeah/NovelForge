@@ -54,14 +54,17 @@ fun PaperButton(
 @Composable
 fun PaperSurface(
     modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
     content: @Composable () -> Unit
 ) {
     val scheme = MaterialTheme.colorScheme
+    val click = if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier
     Box(
         modifier = modifier
             .clip(PaperShape)
             .background(scheme.surface)
             .border(1.dp, scheme.outlineVariant, PaperShape)
+            .then(click)
     ) {
         content()
     }

@@ -5,7 +5,9 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -15,6 +17,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.novelforge.app.presentation.common.PaperTopBar
+import com.novelforge.app.ui.theme.PaperButton
 
 @Composable
 fun CreateProjectScreen(
@@ -25,10 +29,16 @@ fun CreateProjectScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(24.dp),
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text("新建小说项目")
+        PaperTopBar(title = "新的作品", subtitle = "先起名，下一步再定题材", onBack = onCancel)
+        Text(
+            "名字可以之后再改。题材、主角和核心冲突不在这一步填写。",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
         OutlinedTextField(
             value = title,
             onValueChange = { title = it },
@@ -36,16 +46,12 @@ fun CreateProjectScreen(
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
-        Text("后续问答会逐步补充题材、主角和核心冲突；当前表单允许先创建草稿。")
-        Button(
+        PaperButton(
+            "下一步",
             onClick = { onCreate(title) },
             enabled = title.isNotBlank(),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Text("创建草稿")
-        }
-        Button(onClick = onCancel, modifier = Modifier.fillMaxWidth()) {
-            Text("取消")
-        }
+            modifier = Modifier.fillMaxWidth(),
+            accent = true
+        )
     }
 }

@@ -22,6 +22,8 @@ import com.novelforge.app.presentation.home.HomeScreen
 import com.novelforge.app.presentation.home.HomeViewModel
 import com.novelforge.app.presentation.library.LibraryScreen
 import com.novelforge.app.presentation.library.LibraryViewModel
+import com.novelforge.app.presentation.ledger.LedgerScreen
+import com.novelforge.app.presentation.ledger.LedgerViewModel
 import com.novelforge.app.presentation.outline.OutlineScreen
 import com.novelforge.app.presentation.outline.OutlineViewModel
 import com.novelforge.app.presentation.project.CreateProjectScreen
@@ -30,6 +32,9 @@ import com.novelforge.app.presentation.project.CreativeSetupViewModel
 import com.novelforge.app.presentation.project.isCreativeSetupComplete
 import com.novelforge.app.presentation.projects.ProjectsScreen
 import com.novelforge.app.presentation.settings.SettingsScreen
+import com.novelforge.app.presentation.story.StoryBibleScreen
+import com.novelforge.app.presentation.story.StoryBibleViewModel
+import com.novelforge.app.infrastructure.llm.MemorySelector
 import com.novelforge.app.domain.model.Project
 import com.novelforge.app.infrastructure.export.ExportChapter
 import com.novelforge.app.infrastructure.export.TxtExporter
@@ -74,14 +79,22 @@ fun NovelForgeApp(application: NovelForgeApplication) {
     NavHost(navController = navController, startDestination = "home") {
         composable("home") {
             HomeScreen(
-                projectCount = projects.size,
+                projects = projects,
+                onContinue = openProject,
                 onCreateProject = { navController.navigate("create") },
                 onOpenProjects = { navController.navigate("projects") },
                 onOpenSettings = { navController.navigate("settings") },
                 onOpenExports = { navController.navigate("exports") },
                 onOpenLibrary = { navController.navigate("library") },
-                onOpenChat = { navController.navigate("chat") }
+                onOpenChat = { navController.navigate("chat") },
+                onOpenLedger = { navController.navigate("ledger") }
             )
+        }
+        composable("ledger") {
+            val ledgerViewModel: LedgerViewModel = viewModel(
+                factory = LedgerViewModel.Factory(application.database.llmCallDao())
+            )
+            LedgerScreen(viewModel = ledgerViewModel, onBack = { navController.popBackStack() })
         }
         composable("projects") {
             ProjectsScreen(
@@ -104,7 +117,8 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                     settingsStore = application.appSettingsStore,
                     apiKeyStore = application.apiKeyStore,
                     client = OpenAiCompatibleClient(),
-                    historyStore = application.chatHistoryStore
+                    historyStore = application.chatHistoryStore,
+                    llmCallRepository = application.llmCallRepository
                 )
             )
             ChatScreen(viewModel = chatViewModel, onBack = { navController.popBackStack() })
@@ -170,8 +184,11 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                     onClearError = viewModel::clearError,
                     onBack = { navController.popBackStack() }
                 )
-                error != null -> androidx.compose.material3.Text(error!!)
-                else -> androidx.compose.material3.Text("正在加载项目…")
+                error != null -> com.novelforge.app.presentation.common.PaperMessage(
+                    text = "项目没有打开",
+                    detail = error
+                )
+                else -> com.novelforge.app.presentation.common.PaperMessage(text = "正在加载项目…")
             }
         }
         composable("settings") {
@@ -179,6 +196,7 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                 settingsStore = application.appSettingsStore,
                 apiKeyStore = application.apiKeyStore,
                 onTestConnection = { application.generationRuntime.testConnection() },
+                onFetchModels = { runCatching { application.generationRuntime.fetchModels() } },
                 onBack = { navController.popBackStack() }
             )
         }
@@ -204,7 +222,7 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                     generationRuntime = application.generationRuntime
                 )
             )
-            val versions by viewModel.versions.collectAsStateWithLifecycle()
+            val outlineVersion by viewModel.outline.collectAsStateWithLifecycle()
             val job by viewModel.activeJob.collectAsStateWithLifecycle()
             val error by viewModel.error.collectAsStateWithLifecycle()
             val autoRun by viewModel.autoRun.collectAsStateWithLifecycle()
@@ -213,11 +231,13 @@ fun NovelForgeApp(application: NovelForgeApplication) {
             val optimizingIndex by viewModel.optimizingIndex.collectAsStateWithLifecycle()
             val wandResult by viewModel.wandResult.collectAsStateWithLifecycle()
             androidx.compose.runtime.LaunchedEffect(autostart, projectId) {
+                // 进大纲页顺手收一次僵尸任务（幂等、廉价查询），长时间驻留的进程也能自愈
+                runCatching { application.generationRuntime.sweepZombieJobs() }
                 if (autostart) viewModel.startAutoRun()
             }
             OutlineScreen(
                 projectTitle = title,
-                versions = versions,
+                outline = outlineVersion,
                 job = job,
                 chapterJob = chapterJob,
                 writtenChapterIds = writtenChapterIds,
@@ -240,7 +260,22 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                 onOptimize = viewModel::optimizeChapter,
                 onStopOptimize = viewModel::stopOptimize,
                 onConsumeWand = viewModel::consumeWandResult,
-                onRegenerateFrom = viewModel::regenerateFrom
+                onRegenerateFrom = viewModel::regenerateFrom,
+                onOpenMemory = { navController.navigate("memory/$projectId") }
+            )
+        }
+        composable(
+            route = "memory/{projectId}",
+            arguments = listOf(navArgument("projectId") { type = NavType.StringType })
+        ) { entry ->
+            val projectId = requireNotNull(entry.arguments?.getString("projectId"))
+            val bibleViewModel: StoryBibleViewModel = viewModel(
+                key = "memory-$projectId",
+                factory = StoryBibleViewModel.Factory(projectId, application.projectRepository)
+            )
+            StoryBibleScreen(
+                viewModel = bibleViewModel,
+                onBack = { navController.popBackStack() }
             )
         }
         composable(
@@ -271,10 +306,22 @@ fun NovelForgeApp(application: NovelForgeApplication) {
             val revisions by viewModel.revisions.collectAsStateWithLifecycle()
             val job by viewModel.activeJob.collectAsStateWithLifecycle()
             val error by viewModel.error.collectAsStateWithLifecycle()
+            val book by viewModel.project.collectAsStateWithLifecycle()
+            val excludedCharacters by viewModel.excludedCharacters.collectAsStateWithLifecycle()
+            val excludedThreads by viewModel.excludedThreads.collectAsStateWithLifecycle()
+            val memory = book?.let {
+                MemorySelector.select(
+                    it.continuityState,
+                    excludedCharacterIds = excludedCharacters,
+                    excludedThreads = excludedThreads,
+                    inputBudget = it.creativeConfig?.inputBudget ?: 8_000
+                )
+            }
             val chapter = outlines.firstOrNull()?.chapters?.firstOrNull { it.id == outlineItemId }
+            // 留洞后 orderIndex 不连续：取"序号更大的下一章"而不是 +1 精确匹配
             val nextChapter = outlines.firstOrNull()?.chapters
                 ?.sortedBy { it.orderIndex }
-                ?.firstOrNull { it.orderIndex == (chapter?.orderIndex ?: -1) + 1 }
+                ?.firstOrNull { it.orderIndex > (chapter?.orderIndex ?: Int.MAX_VALUE) }
             val hasRevision = revisions.any { it.outlineItemId == outlineItemId }
             val exportScope = rememberCoroutineScope()
             androidx.compose.runtime.LaunchedEffect(autostart, chapter?.id, job?.id, hasRevision) {
@@ -352,7 +399,20 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                     }
                 },
                 onClearError = viewModel::clearError,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                memoryCharacters = book?.continuityState?.characters.orEmpty()
+                    .filter { it.name.isNotBlank() }
+                    .map { it.id to it.name },
+                excludedCharacterIds = excludedCharacters,
+                memoryThreads = book?.continuityState?.unresolvedThreads.orEmpty().filter { it.isNotBlank() },
+                excludedThreads = excludedThreads,
+                factCount = memory?.factCount ?: 0,
+                pendingCount = book?.continuityState?.pendingFacts?.size ?: 0,
+                onToggleCharacter = viewModel::toggleCharacter,
+                onToggleThread = viewModel::toggleThread,
+                onOpenMemory = { navController.navigate("memory/$projectId") },
+                previousRevision = chapter?.let(viewModel::previousRevisionFor),
+                onRestorePrevious = { chapter?.let(viewModel::restorePrevious) }
             )
         }
     }

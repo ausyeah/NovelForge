@@ -1,6 +1,9 @@
 package com.novelforge.app.presentation.library
 
+import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
@@ -34,10 +37,13 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -52,16 +58,17 @@ import com.novelforge.app.domain.model.label
 import com.novelforge.app.domain.repository.ChapterRepository
 import com.novelforge.app.domain.repository.OutlineRepository
 import com.novelforge.app.domain.repository.ProjectRepository
+import com.novelforge.app.presentation.common.PaperTopBar
 import com.novelforge.app.presentation.common.chapterLabel
 import com.novelforge.app.presentation.common.cleanChapterTitle
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-
 data class LibraryChapter(
     val orderIndex: Int,
     val title: String,
@@ -115,7 +122,10 @@ class LibraryViewModel(
     }
 
     fun recordRead(projectId: String, orderIndex: Int) {
-        viewModelScope.launch { readingPositionStore.record(projectId, orderIndex) }
+        viewModelScope.launch {
+            readingPositionStore.record(projectId, orderIndex)
+            _novel.update { n -> n?.takeIf { it.projectId == projectId }?.copy(lastReadOrderIndex = orderIndex) }
+        }
     }
 
     /** 书架目录内重命名章节标题（产生新的大纲版本） */
@@ -230,6 +240,8 @@ private fun ReaderBody(
     textColor: Color,
     fontSize: Int,
     modifier: Modifier = Modifier,
+    hasPrev: Boolean,
+    hasNext: Boolean,
     onPrev: () -> Unit,
     onNext: () -> Unit,
     themeName: String,
@@ -253,26 +265,32 @@ private fun ReaderBody(
                 fontSize = fontSize.sp,
                 lineHeight = (fontSize * 1.7).sp
             )
-            // 底部：左「上一章/下一章」· 中主题 · 右「A-/A+」
+            // 底部控制条压成一排：上一章｜主题｜A- 号数 A+｜下一章，尽量少占阅读空间
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    OutlinedButton(onClick = onPrev) { Text("上一章") }
-                    OutlinedButton(onClick = onNext) { Text("下一章") }
-                }
+                TextButton(onClick = onPrev, enabled = hasPrev) { Text("〈上一章") }
                 TextButton(onClick = onCycleTheme) {
-                    Text("主题：$themeName")
+                    Text(themeName, style = MaterialTheme.typography.bodySmall)
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    OutlinedButton(onClick = onShrinkFont) { Text("A-") }
-                    OutlinedButton(onClick = onGrowFont) { Text("A+") }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    TextButton(onClick = onShrinkFont) { Text("A-") }
+                    Text("$fontSize", style = MaterialTheme.typography.bodySmall, color = textColor)
+                    TextButton(onClick = onGrowFont) { Text("A+") }
                 }
+                TextButton(onClick = onNext, enabled = hasNext) { Text("下一章〉") }
             }
         }
     }
+}
+
+private object LibraryPendingStore {
+    var target: Project? = null
 }
 
 private val COVER_COLORS = listOf(
@@ -291,6 +309,7 @@ fun LibraryScreen(
     val projects by viewModel.projects.collectAsStateWithLifecycle()
     val novel by viewModel.novel.collectAsStateWithLifecycle()
     var reading by remember { mutableStateOf<LibraryChapter?>(null) }
+    var dirReverse by rememberSaveable { mutableStateOf(false) }
     var chapterAction by remember { mutableStateOf<LibraryChapter?>(null) }
     var chapterRename by remember { mutableStateOf<LibraryChapter?>(null) }
     var chapterRenameTitle by remember { mutableStateOf("") }
@@ -302,6 +321,40 @@ fun LibraryScreen(
     var themeIndex by remember { mutableIntStateOf(0) }
     var fontSize by remember { mutableIntStateOf(18) }
     val readerThemes = listOf(followReaderTheme()) + READER_THEMES
+    var backupTarget by LibraryPendingStore::target
+    var backupMessage by remember { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val app = com.novelforge.app.infrastructure.backup.NovelForgeRefs.application
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json")
+    ) { uri: Uri? ->
+        val target = backupTarget
+        backupTarget = null
+        if (uri != null && target != null) {
+            scope.launch {
+                backupMessage = runCatching {
+                    context.contentResolver.openOutputStream(uri)?.use { stream ->
+                        app.backupStore.export(target.id, stream)
+                    } ?: error("无法写入所选文件")
+                    "已导出《${target.title}》的完整备份"
+                }.getOrElse { "导出失败：${it.message}" }
+            }
+        }
+    }
+    val importLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            scope.launch {
+                backupMessage = runCatching {
+                    val imported = context.contentResolver.openInputStream(uri)
+                        ?.use { app.backupStore.import(it) } ?: error("无法读取所选文件")
+                    "已导入《${imported.title}》，见书架/项目列表"
+                }.getOrElse { "导入失败：${it.message}" }
+            }
+        }
+    }
 
     // 返回逻辑：阅读 → 章节列表 → 书架 → 主页，一次只退一步
     BackHandler(enabled = reading != null) { reading = null }
@@ -338,11 +391,14 @@ fun LibraryScreen(
                     )
                     TextButton(onClick = { viewModel.close(); reading = null }) { Text("书架 〉") }
                 }
+                val writtenChapters = current.chapters.filter { it.content != null }
                 ReaderBody(
                     chapter = chapter,
                     textColor = theme.text,
                     fontSize = fontSize,
                     modifier = Modifier.weight(1f),
+                    hasPrev = writtenChapters.any { it.orderIndex < chapter.orderIndex },
+                    hasNext = writtenChapters.any { it.orderIndex > chapter.orderIndex },
                     onPrev = {
                         current.chapters.lastOrNull { it.content != null && it.orderIndex < chapter.orderIndex }?.let {
                             viewModel.recordRead(current.projectId, it.orderIndex)
@@ -362,11 +418,16 @@ fun LibraryScreen(
                 )
             }
             current != null -> {
-                Text("《${current.title}》章节", style = MaterialTheme.typography.headlineSmall)
                 val generated = current.chapters.count { it.content != null }
-                Text(
-                    "已生成 $generated/${current.chapters.size} 章 · 点章节即可阅读",
-                    style = MaterialTheme.typography.bodySmall
+                PaperTopBar(
+                    title = "《${current.title}》",
+                    subtitle = "已生成 $generated/${current.chapters.size} 章",
+                    onBack = { viewModel.close() },
+                    trailing = {
+                        TextButton(onClick = { dirReverse = !dirReverse }) {
+                            Text(if (dirReverse) "倒序" else "正序")
+                        }
+                    }
                 )
                 // 一键续读：回到上次读到的章节
                 val resumeChapter = current.lastReadOrderIndex?.let { idx ->
@@ -387,7 +448,11 @@ fun LibraryScreen(
                     }
                 }
                 if (current.chapters.isEmpty()) {
-                    Text("还没有大纲章节。")
+                    Text(
+                        "还没有大纲。回到作品里生成后再来读。",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
                 LazyColumn(
                     modifier = Modifier
@@ -395,7 +460,7 @@ fun LibraryScreen(
                         .fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(current.chapters, key = { it.orderIndex }) { chapter ->
+                    items(if (dirReverse) current.chapters.reversed() else current.chapters, key = { it.orderIndex }) { chapter ->
                         Card(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -423,23 +488,30 @@ fun LibraryScreen(
                         }
                     }
                 }
-                OutlinedButton(onClick = { viewModel.close() }, modifier = Modifier.fillMaxWidth()) {
-                    Text("返回书架")
-                }
             }
             projects.isEmpty() -> {
-                Text("我的书架", style = MaterialTheme.typography.headlineSmall)
-                Text("还没有作品。先回主页新建一本小说吧。")
-                Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-                    Text("返回主页")
-                }
+                PaperTopBar(title = "书架", onBack = onBack)
+                Text(
+                    "还没有作品。先回主页新建一本。",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
             else -> {
-                Text("我的书架", style = MaterialTheme.typography.headlineSmall)
-                Text(
-                    "点封面进入阅读；长按封面可重命名或删除。",
-                    style = MaterialTheme.typography.bodySmall
+                PaperTopBar(
+                    title = "书架",
+                    subtitle = "点封面阅读，长按可备份或改名",
+                    onBack = onBack,
+                    trailing = {
+                        TextButton(onClick = { importLauncher.launch(arrayOf("application/json")) }) {
+                            Text("导入")
+                        }
+                    }
                 )
+                backupMessage?.let {
+                    Text(it, style = MaterialTheme.typography.bodySmall)
+                    TextButton(onClick = { backupMessage = null }) { Text("关闭提示") }
+                }
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
                     modifier = Modifier
@@ -469,16 +541,13 @@ fun LibraryScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                "状态：${project.status.label()}",
+                                project.status.label(),
                                 color = Color.White.copy(alpha = 0.8f),
                                 style = MaterialTheme.typography.bodySmall,
                                 modifier = Modifier.align(Alignment.BottomStart)
                             )
                         }
                     }
-                }
-                Button(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-                    Text("返回主页")
                 }
             }
         }
@@ -488,19 +557,31 @@ fun LibraryScreen(
         AlertDialog(
             onDismissRequest = { actionTarget = null },
             title = { Text("《${target.title}》") },
-            text = { Text("选择要执行的操作：") },
-            confirmButton = {
-                TextButton(onClick = {
-                    renameTarget = target
-                    renameTitle = target.title
-                    actionTarget = null
-                }) { Text("重命名") }
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("选择要执行的操作：")
+                    Button(
+                        onClick = {
+                            actionTarget = null
+                            backupTarget = target
+                            exportLauncher.launch(app.backupStore.suggestedFileName(target.title))
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("导出整书备份（大纲 + 正文）") }
+                    TextButton(onClick = {
+                        renameTarget = target
+                        renameTitle = target.title
+                        actionTarget = null
+                    }) { Text("重命名") }
+                    TextButton(onClick = {
+                        deleteTarget = target
+                        actionTarget = null
+                    }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                }
             },
+            confirmButton = {},
             dismissButton = {
-                TextButton(onClick = {
-                    deleteTarget = target
-                    actionTarget = null
-                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                TextButton(onClick = { actionTarget = null }) { Text("取消") }
             }
         )
     }
@@ -578,27 +659,6 @@ fun LibraryScreen(
             },
             dismissButton = {
                 TextButton(onClick = { chapterDelete = null }) { Text("取消") }
-            }
-        )
-    }
-
-    actionTarget?.let { target ->
-        AlertDialog(
-            onDismissRequest = { actionTarget = null },
-            title = { Text("《${target.title}》") },
-            text = { Text("选择要执行的操作：") },
-            confirmButton = {
-                TextButton(onClick = {
-                    renameTarget = target
-                    renameTitle = target.title
-                    actionTarget = null
-                }) { Text("重命名") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    deleteTarget = target
-                    actionTarget = null
-                }) { Text("删除", color = MaterialTheme.colorScheme.error) }
             }
         )
     }

@@ -85,6 +85,10 @@ class JsonResponseValidator(
             if (items.any { it.summary.isBlank() }) {
                 return JsonValidationResult.Failure("大纲存在空概要")
             }
+            // 保留模型/检查点自带的 orderIndex（删章留洞是设计）；仅在缺失或撞号时按位置兜底
+            if (items.map { it.orderIndex }.distinct().size != items.size) {
+                items = items.mapIndexed { index, item -> item.copy(orderIndex = index) }
+            }
             val usedIds = mutableSetOf<String>()
             val normalizedItems = items.mapIndexed { index, item ->
                 var candidateId = item.id.ifBlank { "outline-item-${index + 1}" }
@@ -96,7 +100,7 @@ class JsonResponseValidator(
                         suffix++
                     }
                 }
-                item.copy(id = candidateId, orderIndex = index)
+                item.copy(id = candidateId)
             }
             JsonValidationResult.Success(normalizedItems, normalized)
         } catch (error: Exception) {

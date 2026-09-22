@@ -6,6 +6,14 @@
 
 API Key 只以 Android Keystore 保护的 AES-GCM 密文留在这台手机上。
 
+## 界面
+
+左上是首页，右上是写到 525 章时的大纲，「问问这本书」默认收起。左下是已经写出的章节，右下是阅读页。
+
+<p align="center">
+  <img src="docs/screenshots/overview.jpg" alt="NovelForge 首页、大纲、书架和阅读" width="920">
+</p>
+
 ## 这个项目在解决什么
 
 长篇生成失败，通常不是因为单章写不出来，而是写到后面把开头的设定挤出了上下文，或者把模型自己抽出的笔记当成了已经发生的事。

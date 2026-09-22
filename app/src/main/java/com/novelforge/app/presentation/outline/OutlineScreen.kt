@@ -86,8 +86,7 @@ fun OutlineScreen(
     agentSteps: List<AgentStep> = emptyList(),
     agentBusy: Boolean = false,
     agentError: String? = null,
-    onAskAgent: (String) -> Unit = {},
-    onContinueAgent: () -> Unit = {}
+    onAskAgent: (String) -> Unit = {}
 ) {
     // 进度计数不做全量 JSON 解析：checkpoint 每 2 秒触发一次，335 章 blob 解析会卡主线程
     val savedChapterCount = remember(job?.partialContent) {
@@ -255,8 +254,7 @@ fun OutlineScreen(
                 steps = agentSteps,
                 busy = agentBusy,
                 error = agentError,
-                onAsk = onAskAgent,
-                onContinue = onContinueAgent
+                onAsk = onAskAgent
             )
             overviewButtons()
         }

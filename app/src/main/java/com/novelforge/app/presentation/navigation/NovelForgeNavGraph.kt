@@ -238,8 +238,7 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                 key = "agent-$projectId",
                 factory = AgentAssistViewModel.Factory(
                     projectId = projectId,
-                    registry = application.novelToolRegistry,
-                    model = application.agentModel,
+                    bookQuestion = application.bookQuestion,
                     traceStore = application.agentTraceStore
                 )
             )
@@ -281,8 +280,7 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                 agentSteps = agentSteps,
                 agentBusy = agentBusy,
                 agentError = agentError,
-                onAskAgent = agentViewModel::ask,
-                onContinueAgent = agentViewModel::continueRun
+                onAskAgent = agentViewModel::ask
             )
         }
         composable(

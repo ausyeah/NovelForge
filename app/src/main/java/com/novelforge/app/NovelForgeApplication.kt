@@ -19,6 +19,7 @@ import com.novelforge.app.data.repository.RoomOutlineRepository
 import com.novelforge.app.data.repository.RoomPromptSnapshotRepository
 import com.novelforge.app.data.repository.RoomProjectRepository
 import com.novelforge.app.data.security.KeystoreApiKeyStore
+import com.novelforge.app.agent.BookQuestion
 import com.novelforge.app.agent.LlmAgentModel
 import com.novelforge.app.agent.NovelToolRegistry
 import com.novelforge.app.agent.RoomNovelBookStore
@@ -56,20 +57,24 @@ class NovelForgeApplication : Application(), GenerationWorkerDependenciesProvide
     val appSettingsStore by lazy { AppSettingsStore(this) }
     val modelPresetStore by lazy { ModelPresetStore(this, apiKeyStore) }
     val agentTraceStore by lazy { AgentTraceStore(this) }
-    val novelToolRegistry by lazy {
-        NovelToolRegistry(
-            RoomNovelBookStore(
-                projectRepository = projectRepository,
-                outlineRepository = outlineRepository,
-                chapterRepository = chapterRepository,
-                artifacts = generationArtifactRepository,
-                enqueue = { projectId, chapter, context ->
-                    generationRuntime.queueChapter(projectId, chapter, context).id
-                }
-            )
+    private val bookStore by lazy {
+        RoomNovelBookStore(
+            projectRepository = projectRepository,
+            outlineRepository = outlineRepository,
+            chapterRepository = chapterRepository,
+            artifacts = generationArtifactRepository,
+            enqueue = { projectId, chapter, context ->
+                generationRuntime.queueChapter(projectId, chapter, context).id
+            }
         )
     }
+    val novelToolRegistry by lazy { NovelToolRegistry(bookStore) }
     val agentModel by lazy { LlmAgentModel(appSettingsStore, apiKeyStore) }
+    val bookQuestion by lazy {
+        BookQuestion(bookStore) { context, question ->
+            agentModel.answerAboutBook(context, question)
+        }
+    }
     val wallpaperStore by lazy { WallpaperStore(this) }
     val chatHistoryStore by lazy { com.novelforge.app.data.chat.ChatHistoryStore(this) }
     // 必须全局单例：PreferenceDataStoreFactory 每次 create 都会注册一个新 DataStore，

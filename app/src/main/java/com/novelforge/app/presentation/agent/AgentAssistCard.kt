@@ -29,13 +29,10 @@ fun AgentAssistCard(
     steps: List<AgentStep>,
     busy: Boolean,
     error: String?,
-    onAsk: (String) -> Unit,
-    onContinue: () -> Unit
+    onAsk: (String) -> Unit
 ) {
     var open by rememberSaveable { mutableStateOf(false) }
     var input by rememberSaveable { mutableStateOf("") }
-    val toolCount = steps.count { it.kind == "tool" }
-    val canContinue = steps.lastOrNull()?.kind == "tool" && !busy
     LaunchedEffect(busy, steps.size) {
         if (busy || steps.isNotEmpty()) open = true
     }
@@ -46,7 +43,7 @@ fun AgentAssistCard(
         ) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text(
-                    if (toolCount == 0) "查书助手" else "查书助手 · $toolCount/6 步",
+                    "问问这本书",
                     style = MaterialTheme.typography.titleSmall,
                     modifier = Modifier.weight(1f)
                 )
@@ -54,7 +51,7 @@ fun AgentAssistCard(
             }
             if (open) {
                 Text(
-                    "只查这本书，最多 6 步。每记下一步，重新打开后可以继续。",
+                    "一次提问。带上大纲和相关片段，不发送全文。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -89,9 +86,6 @@ fun AgentAssistCard(
                     modifier = Modifier.fillMaxWidth(),
                     accent = true
                 )
-                if (canContinue) {
-                    PaperButton("继续上次", onContinue, modifier = Modifier.fillMaxWidth())
-                }
             }
         }
     }

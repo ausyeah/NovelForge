@@ -154,7 +154,7 @@ TXT 另外导出，保存在「下载/NovelForge/」，可以离线看，也可�
 
 ## 下载
 
-**[Releases 页面](https://github.com/ausyeah/NovelForge/releases/tag/v0.2.0-beta42)** 提供 debug 构建的 APK，可直接安装到 Android 8 及以上。
+**[Releases 页面](https://github.com/ausyeah/NovelForge/releases/tag/v0.2.0-beta43)** 提供可直接安装的 release 构建 APK，可安装到 Android 8 及以上。
 
 装好后到「模型设置」里填自己的 OpenAI-compatible 接口（Base URL、模型名、API Key）。接口可以存多套预设，同一服务商的不同接口会自动标成「名称（2）」，点一下就拉回表单改。
 

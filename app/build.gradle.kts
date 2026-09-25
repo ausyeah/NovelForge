@@ -38,8 +38,8 @@ android {
         applicationId = "com.novelforge.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 141
-        versionName = "0.2.0-beta42"
+        versionCode = 142
+        versionName = "0.2.0-beta43"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -47,11 +47,20 @@ android {
 
     buildTypes {
         release {
+            // 保持关闭：Room / kotlinx.serialization / OkHttp 的反射面很大，
+            // 一旦开 minify 就要逐个补 keep 规则，收益远小于风险。
+            // release 与 debug 的差别因此只剩「可调试标记」和资源收缩。
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // 没配签名的话 assembleRelease 产出的是 unsigned APK，装不上。
+            // 这里用 debug keystore 签，好处是「发出去的包一定能装、能覆盖升级」。
+            // 注意：debug keystore 的口令是公开的（android），任何人都能签出
+            // 一个能覆盖安装的包 —— 这只适合自测分发。要公开发布必须换成
+            // 自己的 keystore，并把口令放进 local.properties 或环境变量。
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 

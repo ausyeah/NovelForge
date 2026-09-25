@@ -210,6 +210,14 @@ class GenerationUseCaseTest {
         override suspend fun deleteProject(id: String) {
             if (saved?.id == id) saved = null
         }
+
+        override suspend fun mutateContinuity(
+            id: String,
+            block: (com.novelforge.app.domain.model.ContinuityState) -> com.novelforge.app.domain.model.ContinuityState
+        ) {
+            val current = saved?.takeIf { it.id == id } ?: return
+            saved = current.copy(continuityState = block(current.continuityState))
+        }
     }
 
     private class RecordingGenerationRepository : GenerationRepository {
@@ -230,6 +238,13 @@ class GenerationUseCaseTest {
             created = job
             return true
         }
+
+        /** 行已不存在时必须落空：重生成大纲清掉旧任务后，不许被飞行中的 worker 插回来。 */
+        override suspend fun updateJobIfExists(job: GenerationJob): Boolean {
+            if (created?.id != job.id) return false
+            created = job
+            return true
+        }
         override suspend fun deleteAllJobs(projectId: String) {
             if (created?.projectId == projectId) created = null
         }
@@ -241,7 +256,7 @@ class GenerationUseCaseTest {
 
         override suspend fun findById(id: String): GenerationJob? = created?.takeIf { it.id == id }
 
-        override suspend fun findByClientRequestId(clientRequestId: String): GenerationJob? =
+        override suspend fun findByClientRequestId(projectId: String, clientRequestId: String): GenerationJob? =
             created?.takeIf { it.clientRequestId == clientRequestId }
 
         override suspend fun findActiveJob(

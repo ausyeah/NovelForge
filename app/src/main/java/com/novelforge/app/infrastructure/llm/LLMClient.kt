@@ -71,7 +71,14 @@ interface LLMClient {
 
 class ProviderHttpException(
     val statusCode: Int,
-    val retryAfterSeconds: Long? = null
-) : RuntimeException("LLM provider returned HTTP $statusCode")
+    val retryAfterSeconds: Long? = null,
+    /** 服务商在错误体里给的原因，例如「Incorrect API key provided」。 */
+    val providerMessage: String? = null
+) : RuntimeException(
+    buildString {
+        append("服务商返回 HTTP ").append(statusCode)
+        providerMessage?.takeIf { it.isNotBlank() }?.let { append("：").append(it) }
+    }
+)
 
 class ProviderProtocolException(message: String) : RuntimeException(message)

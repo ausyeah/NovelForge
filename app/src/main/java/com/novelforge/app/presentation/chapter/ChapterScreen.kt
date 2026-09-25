@@ -70,6 +70,9 @@ fun ChapterScreen(
     memoryThreads: List<String> = emptyList(),
     excludedThreads: Set<String> = emptySet(),
     factCount: Int = 0,
+    omittedCharacters: Int = 0,
+    omittedThreads: Int = 0,
+    omittedRules: Int = 0,
     pendingCount: Int = 0,
     onToggleCharacter: (String) -> Unit = {},
     onToggleThread: (String) -> Unit = {},
@@ -107,6 +110,9 @@ fun ChapterScreen(
             threads = memoryThreads,
             excludedThreads = excludedThreads,
             factCount = factCount,
+            omittedCharacters = omittedCharacters,
+            omittedThreads = omittedThreads,
+            omittedRules = omittedRules,
             pendingCount = pendingCount,
             onToggleCharacter = onToggleCharacter,
             onToggleThread = onToggleThread,
@@ -292,17 +298,37 @@ private fun MemoryStrip(
     threads: List<String>,
     excludedThreads: Set<String>,
     factCount: Int,
+    omittedCharacters: Int,
+    omittedThreads: Int,
+    omittedRules: Int,
     pendingCount: Int,
     onToggleCharacter: (String) -> Unit,
     onToggleThread: (String) -> Unit,
     onOpenMemory: () -> Unit
 ) {
+    // 只报「带几个」是在骗人：以前这里算的是排除之后的全长，
+    // 于是界面上写着「会带上 20 个角色、30 条伏笔」，实际 prompt 里只有 6 和 10。
+    // 用户按这个数字做判断，被落选的角色/伏笔就变成「我明明写了它却不用」。
     val includedCharacters = characters.count { it.first !in excludedCharacterIds }
     val includedThreads = threads.count { it !in excludedThreads }
+    val overBudget = omittedCharacters + omittedThreads + omittedRules
     Text(
-        "这次会带上 $includedCharacters 个角色、$includedThreads 条伏笔、$factCount 条已确认事实。点一下可以先不带。",
+        buildString {
+            append("这次会带上 $includedCharacters/${characters.size} 个角色")
+            append("、$includedThreads/${threads.size} 条伏笔")
+            append("、$factCount 条已确认事实")
+            if (overBudget > 0) {
+                append("。另有 $overBudget 条这次名额不够没带")
+                append("（其中规则 $omittedRules 条）")
+            }
+            append("。点一下可以先不带。")
+        },
         style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant
+        color = if (overBudget > 0) {
+            MaterialTheme.colorScheme.error
+        } else {
+            MaterialTheme.colorScheme.onSurfaceVariant
+        }
     )
     if (characters.isNotEmpty() || threads.isNotEmpty()) {
         Row(

@@ -8,8 +8,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.core.app.ActivityCompat
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.novelforge.app.data.settings.AppSettings
 import com.novelforge.app.presentation.navigation.NovelForgeApp
 import com.novelforge.app.ui.theme.NovelForgeTheme
 
@@ -19,7 +24,16 @@ class MainActivity : ComponentActivity() {
         requestNotificationPermissionIfNeeded()
         setContent {
             val app = application as NovelForgeApplication
-            val settings by app.appSettingsStore.settings.collectAsStateWithLifecycle(initialValue = null)
+            // 不能用 collectAsStateWithLifecycle(initialValue = null)：
+            // 它在 STOPPED 以下会退订，打开相册 / SAF 建文档 / 导入选择器时 Activity 一定
+            // 走到 STOPPED，回来重新订阅会先吐 initialValue=null，
+            // 于是 settings==null → dark=isSystemInDarkTheme()，
+            // 应用主题和系统主题不一致时整屏闪一下（每次导出备份、每次换壁纸都闪）。
+            // 这里只保留「最后读到的非空设置」，流短暂断开也不会退回系统色。
+            var settings by remember { mutableStateOf<AppSettings?>(null) }
+            LaunchedEffect(app) {
+                app.appSettingsStore.settings.collect { settings = it }
+            }
             val systemDark = isSystemInDarkTheme()
             val dark = when (settings?.themeMode) {
                 "light" -> false

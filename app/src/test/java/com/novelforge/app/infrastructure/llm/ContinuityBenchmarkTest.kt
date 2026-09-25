@@ -14,12 +14,15 @@ class ContinuityBenchmarkTest {
         val dumped = scores.getValue("全量塞入")
 
         assertEquals(0, blind.requiredKept)
-        assertEquals(0, recent.requiredKept)
+        // 「只留最近」现在能保住那条新加的伏笔：伏笔倒序取，
+        // 预算不够时先保最新的，而不是把最旧的 10 条留着、把新加的那条丢掉。
+        // 角色仍然拿不到（存进去的就是 6 个路人，主角排在第 7 个），
+        // 事实也仍然是 12 条最新的杂事 —— 所以 3 项里只中 1 项。
+        assertEquals(1, recent.requiredKept)
         assertEquals(0, recent.polluted)
         assertEquals(3, hinted.requiredKept)
         assertEquals(3, dumped.requiredKept)
         assertEquals(0, hinted.polluted)
-        assertEquals(0, recent.polluted)
         assertTrue(dumped.polluted > 0)
         assertTrue(hinted.promptChars < dumped.promptChars)
     }

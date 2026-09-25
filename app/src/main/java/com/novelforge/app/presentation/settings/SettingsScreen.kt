@@ -1,5 +1,6 @@
 package com.novelforge.app.presentation.settings
 
+import android.graphics.Bitmap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -37,10 +38,15 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.novelforge.app.presentation.common.PaperTopBar
+import com.novelforge.app.ui.theme.LocalNovelForgeDark
 import com.novelforge.app.ui.theme.WALLPAPER_FILE_NAME
 import com.novelforge.app.ui.theme.WallpaperStore
 import com.novelforge.app.ui.theme.decodeSampledBitmap
+import com.novelforge.app.ui.theme.wallpaperDimRange
 import com.novelforge.app.data.security.ApiKeyStore
 import com.novelforge.app.data.settings.AppSettings
 import com.novelforge.app.data.settings.AppSettingsStore
@@ -49,8 +55,10 @@ import com.novelforge.app.data.settings.ModelPresetStore
 import com.novelforge.app.data.settings.upsertModelPreset
 import com.novelforge.app.ui.theme.PaperSurface
 import com.novelforge.app.infrastructure.jobs.ConnectionTestResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -65,6 +73,8 @@ fun SettingsScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // 取景原图（最大约 26MB）挂在这个 ViewModel 上，见类注释
+    val wallpaperViewModel: SettingsWallpaperViewModel = viewModel()
     var settings by remember { mutableStateOf(AppSettings()) }
     var apiKey by remember { mutableStateOf("") }
     var saved by remember { mutableStateOf(false) }
@@ -72,7 +82,6 @@ fun SettingsScreen(
     var testing by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var connectionMessage by remember { mutableStateOf<String?>(null) }
-    var cropSource by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     val wallpaperPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.PickVisualMedia()
     ) { uri ->
@@ -84,7 +93,7 @@ fun SettingsScreen(
             if (decoded == null) {
                 connectionMessage = "这张图片没有读出来，换一张试试"
             } else {
-                cropSource = decoded
+                wallpaperViewModel.openCrop(decoded)
             }
         }
     }
@@ -149,26 +158,30 @@ fun SettingsScreen(
             }) { Text(if (settings.wallpaperFileName.isBlank()) "选择图片" else "更换图片") }
             if (settings.wallpaperFileName.isNotBlank()) {
                 OutlinedButton(onClick = {
-                    wallpaperStore.clear()
                     settings = settings.copy(wallpaperFileName = "")
                     scope.launch {
+                        wallpaperStore.clear()
                         settingsStore.update { current -> current.copy(wallpaperFileName = "") }
                     }
                 }) { Text("恢复纸色") }
             }
         }
         if (settings.wallpaperFileName.isNotBlank()) {
-            Text("纸色遮罩 ${settings.wallpaperDim}", style = MaterialTheme.typography.bodySmall)
+            // 主题里 clamp 过的是同一份区间，滑块和实际渲染不会各说各话。
+            // 老的 35–62 落在新区间之外，直接抬进来当显示值（不自动改写用户配置）
+            val dimRange = wallpaperDimRange(LocalNovelForgeDark.current)
+            val dimValue = settings.wallpaperDim.toFloat().coerceIn(dimRange)
+            Text("纸色遮罩 ${dimValue.roundToInt()}", style = MaterialTheme.typography.bodySmall)
             Slider(
-                value = settings.wallpaperDim.toFloat(),
-                onValueChange = { settings = settings.copy(wallpaperDim = it.toInt()) },
+                value = dimValue,
+                onValueChange = { settings = settings.copy(wallpaperDim = it.roundToInt()) },
                 onValueChangeFinished = {
                     scope.launch {
                         val dim = settings.wallpaperDim
                         settingsStore.update { current -> current.copy(wallpaperDim = dim) }
                     }
                 },
-                valueRange = 35f..90f
+                valueRange = dimRange
             )
         }
         Text("已保存的配置", style = MaterialTheme.typography.titleSmall)
@@ -393,19 +406,90 @@ fun SettingsScreen(
             }
         )
     }
-    cropSource?.let { source ->
+    wallpaperViewModel.publishError?.let { message ->
+        AlertDialog(
+            onDismissRequest = { wallpaperViewModel.consumePublishError() },
+            title = { Text("壁纸没存上") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { wallpaperViewModel.consumePublishError() }) { Text("知道了") }
+            }
+        )
+    }
+    wallpaperViewModel.cropSource?.let { source ->
         WallpaperCropDialog(
             source = source,
-            onCancel = { cropSource = null },
+            busy = wallpaperViewModel.publishing,
+            onCancel = { wallpaperViewModel.closeCrop() },
             onConfirm = { cropped ->
-                wallpaperStore.publish(cropped)
-                settings = settings.copy(wallpaperFileName = WALLPAPER_FILE_NAME)
-                cropSource = null
-                scope.launch {
+                wallpaperViewModel.publish(cropped) {
+                    wallpaperStore.publish(cropped)
+                    settings = settings.copy(wallpaperFileName = WALLPAPER_FILE_NAME)
                     settingsStore.update { current -> current.copy(wallpaperFileName = WALLPAPER_FILE_NAME) }
                 }
             }
         )
+    }
+}
+
+/**
+ * 只为「转屏别把取景框关掉」而存在的一个极小 ViewModel。
+ *
+ * 为什么不用 remember：普通 remember 在配置变更后重置，用户选好图正在拖动时转个屏，
+ * 取景框当场消失，这张图等于白选。
+ * 为什么不用 rememberSaveable：Bitmap 不是 Parcelable，塞不进 Bundle；硬塞就是
+ * 几十 MB 的进程状态，Activity 回收时直接 TransactionTooLarge。
+ * 为什么不用「rememberSaveable 存个标记 + 全局 Map 缓存位图」：那张 Map 谁也回收不掉，
+ * 等于把 26MB 泄漏搬到进程级，还得手写淘汰逻辑。
+ * ViewModel 由 NavBackStackEntry 持有，转屏活、离开本页即释放，生命周期正好对上。
+ */
+class SettingsWallpaperViewModel : ViewModel() {
+    /** 待裁剪的原图；null 表示取景框不显示。裁完就置空，26MB 立刻可回收。 */
+    var cropSource by mutableStateOf<Bitmap?>(null)
+        private set
+
+    /** 存盘进行中，用来锁住确认按钮。 */
+    var publishing by mutableStateOf(false)
+        private set
+
+    /** 存盘失败文案。以前 publish 是同步调用、异常被 runCatching 吃掉，搬进协程后必须自己接住。 */
+    var publishError by mutableStateOf<String?>(null)
+        private set
+
+    fun openCrop(bitmap: Bitmap) {
+        cropSource = bitmap
+    }
+
+    fun closeCrop() {
+        cropSource = null
+    }
+
+    fun consumePublishError() {
+        publishError = null
+    }
+
+    /**
+     * 存盘挂 [viewModelScope] 而不是 composable 的 rememberCoroutineScope：
+     * 写文件途中转屏不会把这次设置腰斩掉（store.publish 内部写临时文件再改名，
+     * 就算真被取消也不会留下半张坏图，但配置就丢了）。
+     */
+    fun publish(bitmap: Bitmap, block: suspend () -> Unit) {
+        if (publishing) return
+        publishing = true
+        publishError = null
+        viewModelScope.launch {
+            try {
+                block()
+                cropSource = null
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (error: Exception) {
+                // viewModelScope 里未捕获的异常会直接把进程带走，写盘失败必须在这里落地
+                publishError = "壁纸保存失败：${error.message ?: "未知原因"}"
+            } finally {
+                publishing = false
+            }
+        }
     }
 }
 

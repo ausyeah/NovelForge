@@ -8,7 +8,9 @@ enum class GenerationPurpose {
     CHAPTER,
     QUALITY_CHECK,
     REPAIR,
-    CHAT
+    CHAT,
+    /** 章后抽记忆的附加调用。它不产生正文，也没有对应的生成任务行。 */
+    MEMORY_NOTES
 }
 
 @Serializable

@@ -31,6 +31,10 @@ class TxtExporter {
      */
     fun writeTo(stream: OutputStream, title: String, chapters: List<ExportChapter>) {
         stream.bufferedWriter(Charsets.UTF_8).use { writer ->
+            // 开头写 UTF-8 BOM（EF BB BF）：小说的主要去处是 Windows 桌面上的记事本/写字板，
+            // 系统默认 GBK(cp936) 时没有 BOM 的 UTF-8 会被整篇判成乱码；
+            // 用 Charset 建的 Writer 不会自己补 BOM，得显式写这个码位（它被编码成那三个字节）。
+            writer.write('\uFEFF'.code)
             writer.appendLine(title)
             writer.appendLine()
             chapters.sortedBy { it.orderIndex }.forEach { chapter ->

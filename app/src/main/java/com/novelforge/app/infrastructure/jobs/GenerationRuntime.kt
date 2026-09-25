@@ -11,6 +11,7 @@ import androidx.work.workDataOf
 import com.novelforge.app.data.security.ApiKeyStore
 import com.novelforge.app.data.settings.AppSettings
 import com.novelforge.app.data.settings.AppSettingsStore
+import com.novelforge.app.data.settings.AutoRunStore
 import com.novelforge.app.domain.model.ChapterRevision
 import com.novelforge.app.domain.model.ChapterStatus
 import com.novelforge.app.domain.model.FlowState
@@ -42,9 +43,11 @@ import com.novelforge.app.infrastructure.llm.ChatRole
 import com.novelforge.app.infrastructure.llm.ChapterContext
 import com.novelforge.app.infrastructure.llm.LLMClient
 import com.novelforge.app.infrastructure.llm.LLMConnectionConfig
+import com.novelforge.app.infrastructure.llm.LlmResponse
 import com.novelforge.app.infrastructure.llm.JsonResponseValidator
 import com.novelforge.app.infrastructure.llm.OutlineEnvelope
 import com.novelforge.app.infrastructure.llm.MemorySelector
+import com.novelforge.app.infrastructure.llm.excerptForExtraction
 import com.novelforge.app.infrastructure.llm.chapterMemoryHint
 import com.novelforge.app.infrastructure.llm.OpenAiCompatibleClient
 import com.novelforge.app.infrastructure.llm.parseMemoryNotes
@@ -53,11 +56,13 @@ import com.novelforge.app.infrastructure.llm.ProviderCapabilities
 import com.novelforge.app.infrastructure.llm.StreamEvent
 import com.novelforge.app.infrastructure.llm.stripInlineReasoning
 import com.novelforge.app.infrastructure.llm.ProviderHttpException
+import com.novelforge.app.infrastructure.llm.ProviderProtocolException
 import com.novelforge.app.infrastructure.llm.PromptBuilder
 import com.novelforge.app.infrastructure.llm.ResponseFormat
 import com.novelforge.app.infrastructure.llm.ResponseFormatKind
 import java.io.IOException
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -98,6 +103,7 @@ class GenerationRuntime(
     private val promptSnapshotRepository: PromptSnapshotRepository,
     private val llmCallRepository: com.novelforge.app.domain.repository.LlmCallRepository,
     private val settingsStore: AppSettingsStore,
+    private val autoRunStore: AutoRunStore,
     private val apiKeyStore: ApiKeyStore,
     private val llmClient: LLMClient = OpenAiCompatibleClient(),
     private val promptBuilder: PromptBuilder = PromptBuilder(),
@@ -109,7 +115,9 @@ class GenerationRuntime(
     private val coordinator = GenerationCoordinator(generationRepository, llmClient, now)
     private val json = Json { encodeDefaults = true; ignoreUnknownKeys = true }
     private val validator = JsonResponseValidator()
-    private val autoNextMutex = Mutex()
+    // 每本书一把锁：以前是全局一把，A 书的自动流转会卡住 B 书的调度。
+    private val autoNextLocks = ConcurrentHashMap<String, Mutex>()
+    private fun autoNextLock(projectId: String) = autoNextLocks.getOrPut(projectId) { Mutex() }
     private val generateOutline = GenerateOutlineUseCase(projectRepository, generationRepository, now)
     private val generateChapter = GenerateChapterUseCase(
         projectRepository,
@@ -141,11 +149,11 @@ class GenerationRuntime(
 
     fun observeJob(id: String): Flow<GenerationJob?> = generationRepository.observeJob(id)
 
-    /** 全自动模式开关（轮次流转：大纲一批 → 本批正文逐章 → 下一批） */
-    val autoRunEnabled: Flow<Boolean> = settingsStore.settings.map { it.autoRunEnabled }
+    /** 全自动模式开关（轮次流转：大纲一批 → 本批正文逐章 → 下一批）。按书存，不跨书串联。 */
+    fun autoRunEnabled(projectId: String): Flow<Boolean> = autoRunStore.observe(projectId)
 
-    suspend fun setAutoRun(enabled: Boolean) {
-        settingsStore.update { it.copy(autoRunEnabled = enabled) }
+    suspend fun setAutoRun(projectId: String, enabled: Boolean) {
+        autoRunStore.set(projectId, enabled)
     }
 
     /**
@@ -190,7 +198,7 @@ class GenerationRuntime(
      * 本批正文写完 → 自动出下一批。失败时停下等用户处理。
      */
     suspend fun startAutoRun(projectId: String) {
-        setAutoRun(true)
+        setAutoRun(projectId, true)
         driveAutoNext(projectId)
     }
 
@@ -200,9 +208,8 @@ class GenerationRuntime(
      * - 本轮 10 章全部写完且全书未完 → 生下一批大纲（R+1）
      * - 全书完成 → 停止
      */
-    private suspend fun driveAutoNext(projectId: String): Unit = autoNextMutex.withLock {
-        val settings = settingsStore.settings.first()
-        if (!settings.autoRunEnabled) return
+    private suspend fun driveAutoNext(projectId: String): Unit = autoNextLock(projectId).withLock {
+        if (!autoRunStore.observe(projectId).first()) return
         val project = projectRepository.getProject(projectId) ?: return
         val total = project.creativeConfig?.chapterCount?.coerceIn(MIN_CHAPTER_COUNT, MAX_CHAPTER_COUNT) ?: return
         val outline = outlineRepository.latest(projectId)
@@ -299,11 +306,21 @@ class GenerationRuntime(
         if (!continueFromExisting) {
             // 全新重生成：旧正文的 id 空间(chapter-N)会被新批次完整复用，
             // 不清掉就是"新目录配旧稿"的静默串书事故（用户已在确认框知情同意）
-            val oldRevisions = chapterRepository.allForProject(projectId)
-            if (oldRevisions.isNotEmpty()) {
-                chapterRepository.deleteAllRevisions(projectId)
-                generationRepository.deleteAllJobs(projectId)
-            }
+            //
+            // 顺序很关键：必须先把在跑的工作停掉。只删库里的行是不够的 ——
+            // 飞行中的 worker 结束时 updateJob 是 REPLACE，作用在已删除的行上
+            // 等于 INSERT，会把任务复活成 COMPLETED，并把旧正文挂回新目录，
+            // 于是新大纲配旧稿，还凭空多出一章「已写正文」。
+            generationRepository.findJobsWithStatuses(
+                listOf(
+                    GenerationJobStatus.QUEUED.name,
+                    GenerationJobStatus.RUNNING.name,
+                    GenerationJobStatus.PAUSED.name,
+                    GenerationJobStatus.RECOVERABLE_PARTIAL.name
+                )
+            ).filter { it.projectId == projectId }
+                .forEach { cancel(it.id) }
+            generationArtifactRepository.wipeChapterArtifacts(projectId)
         }
         val queued = generateOutline(
             projectId = projectId,
@@ -1082,12 +1099,14 @@ class GenerationRuntime(
     }
 
     private suspend fun savePromptSnapshot(queued: QueuedGeneration) {
-        if (promptSnapshotRepository.findById(queued.job.promptSnapshotId) != null) return
+        // 不能在这里按 id 短路。queueChapter 复用了上一轮失败任务时 job 带着旧的
+        // promptSnapshotId，而 worker 发送的是快照里的 messagesJson —— 短路就等于
+        // 把「改设定之前」的连续性状态、角色快照、前章片段再喂一遍模型，
+        // 表现为「我明明把这个角色删了，他还在正文里」「改了设定不生效」。
         savePromptSnapshot(queued.job, queued.request)
     }
 
     private suspend fun savePromptSnapshot(job: GenerationJob, request: ChatRequest) {
-        if (promptSnapshotRepository.findById(job.promptSnapshotId) != null) return
         val messagesJson = json.encodeToString(request.messages)
         promptSnapshotRepository.save(
             PromptSnapshot(
@@ -1228,8 +1247,9 @@ class GenerationRuntime(
             val settings = settingsStore.settings.first()
             val key = apiKeyStore.read()?.takeIf { it.isNotBlank() } ?: return
             if (settings.baseUrl.isBlank() || settings.model.isBlank()) return
-            val excerpt = content.takeLast(1_800)
+            val excerpt = excerptForExtraction(content)
             if (excerpt.isBlank()) return
+            val startedAt = now()
             val response = llmClient.chat(
                 ChatRequest(
                     messages = listOf(
@@ -1245,7 +1265,14 @@ class GenerationRuntime(
 
                             $excerpt
 
-                            只返回：{"facts":["人物或世界的新状态"],"threads":["新埋下、还没收的伏笔"],"resolved":["这一章已经解决的旧线索"]}
+                            只返回：
+                            {"facts":[{"statement":"人物或世界的新状态","subject":"这条讲的是谁（人名/地点/物件）","predicate":"讲的是他的什么（一个短名词，如 左臂状态/身份/持有物）"}],
+                             "threads":[{"statement":"新埋下、还没收的伏笔","subject":"","predicate":""}],
+                             "resolved":[{"statement":"这一章已经解决的旧线索","subject":"","predicate":""}]}
+
+                            subject 和 predicate 很关键：同一个 subject + 同一个 predicate
+                            的两条设定会被当成同一件事的新旧两个状态，后写的顶掉先写的。
+                            不要凭空编 subject；确实是全局设定就留空字符串。
                             """.trimIndent()
                         )
                     ),
@@ -1266,25 +1293,54 @@ class GenerationRuntime(
                 )
             )
             val notes = parseMemoryNotes(response.content, now())
+            // 抽记忆本身就是一次真实开销（输入是整章正文），必须入账。
+            // 以前这里直接 return，账本每章都少算一次调用和约 6k 输入 token。
+            recordMemoryExtractionCall(projectId, chapterId, settings, response, startedAt)
             if (notes.isEmpty()) return
-            val project = projectRepository.getProject(projectId) ?: return
             val stamped = notes.map {
                 it.copy(
                     id = UUID.randomUUID().toString(),
                     sourceChapterId = chapterId
                 )
             }
-            val pending = (project.continuityState.pendingFacts + stamped).takeLast(40)
-            projectRepository.saveProject(
-                project.copy(
-                    continuityState = project.continuityState.copy(pendingFacts = pending),
-                    updatedAt = now()
-                )
-            )
+            // 事务内读-改-写：这里和用户在「本书记忆」点确认是并发的两条路径，
+            // 先取一份 project 快照再整行 REPLACE 会把对方刚写的记忆抹掉。
+            projectRepository.mutateContinuity(projectId) { state ->
+                state.copy(pendingFacts = (state.pendingFacts + stamped).takeLast(MAX_PENDING_FACTS))
+            }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
             // 记忆没抽出来不影响正文
+        }
+    }
+
+    /**
+     * 抽记忆的调用没有对应的 generation_jobs 行（它不产生正文），
+     * 所以直接写一条合成 jobId 的账本记录，让「每一次调用的 Token 都记账」成立。
+     */
+    private suspend fun recordMemoryExtractionCall(
+        projectId: String,
+        chapterId: String,
+        settings: AppSettings,
+        response: LlmResponse,
+        startedAt: Long
+    ) {
+        runCatching {
+            llmCallRepository.save(
+                LlmCall(
+                    id = UUID.randomUUID().toString(),
+                    projectId = projectId,
+                    jobId = "memory-notes-$chapterId-${jobIdTag()}",
+                    purpose = GenerationPurpose.MEMORY_NOTES,
+                    provider = settings.providerName.ifBlank { "OpenAI-compatible" },
+                    model = settings.model,
+                    usage = response.usage,
+                    durationMs = (now() - startedAt).coerceAtLeast(0L),
+                    success = true,
+                    createdAt = now()
+                )
+            )
         }
     }
 
@@ -1356,6 +1412,11 @@ class GenerationRuntime(
     private fun isRetryable(error: Throwable): Boolean = when (error) {
         is IOException -> true
         is ProviderHttpException -> error.statusCode in RETRYABLE_HTTP_CODES
+        // 限流/截断在 OpenAI 兼容网关上是协议层错误而不是 HTTP 错误：
+        // 提前中断、空内容、HTTP 200 里带 error 体，全走 ProviderProtocolException，
+        // 而它自己的提示语就写着「多为服务端限流，请稍后重试」。归到不可重试等于
+        // 第一次抖动就让整夜的任务直接 FAILED，退避配置一次都用不上。
+        is ProviderProtocolException -> true
         else -> false
     }
 
@@ -1397,6 +1458,8 @@ class GenerationRuntime(
         private const val MAX_WORK_ATTEMPTS = 3
         private const val MAX_AUTO_ATTEMPTS_PER_CHAPTER = 3
         private const val PREVIOUS_CONTEXT_LIMIT = 3
+        /** 待确认记忆的存量上限。UI 必须能看全这么多条，否则超出的部分用户永远处理不掉。 */
+        const val MAX_PENDING_FACTS = 40
         private val RETRYABLE_HTTP_CODES = setOf(408, 425, 429, 500, 502, 503, 504)
     }
 }

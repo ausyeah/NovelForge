@@ -39,7 +39,7 @@ class GenerationCoordinator(
         promptSnapshotId: String,
         clientRequestId: String = UUID.randomUUID().toString()
     ): GenerationJob {
-        generationRepository.findByClientRequestId(clientRequestId)?.let { return it }
+        generationRepository.findByClientRequestId(projectId, clientRequestId)?.let { return it }
         generationRepository.findActiveJob(projectId, purpose, targetId)?.let { return it }
         val timestamp = now()
         return GenerationJob(
@@ -110,7 +110,11 @@ class GenerationCoordinator(
                         GenerationEvent.Usage(
                             inputTokens = event.usage.inputTokens,
                             outputTokens = event.usage.outputTokens,
-                            estimated = event.usage.estimated
+                            estimated = event.usage.estimated,
+                            // 这两个字段解析了、落库了、界面上也画出来了，却在这里被丢掉，
+                            // 于是「缓存命中」和「思考 token」两列永远是 0。必须透传。
+                            cachedInputTokens = event.usage.cachedInputTokens,
+                            reasoningTokens = event.usage.reasoningTokens
                         )
                     )
                     is StreamEvent.Finished -> finishReason = event.finishReason

@@ -20,6 +20,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -34,21 +36,35 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import com.novelforge.app.ui.theme.renderWallpaper
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.max
 import kotlin.math.roundToInt
 
 /**
  * 取景框铺满手机画面，比例不能改。用户只能拖动和双指缩放。
+ *
+ * @param busy 调用方还在处理（存盘写文件），这段时间按钮继续锁着。
+ * @param onConfirm 已经是后台上下文，存盘会自己切到 IO 线程。
  */
 @Composable
 fun WallpaperCropDialog(
     source: Bitmap,
+    busy: Boolean = false,
     onCancel: () -> Unit,
-    onConfirm: (Bitmap) -> Unit
+    onConfirm: suspend (Bitmap) -> Unit
 ) {
-    var scale by remember { mutableFloatStateOf(1f) }
-    var offset by remember { mutableStateOf(Offset.Zero) }
+    val scope = rememberCoroutineScope()
+    // 缩放/位移是纯数字，旋转后要接着用；位图由调用方的 ViewModel 扛住旋转
+    var scale by rememberSaveable { mutableFloatStateOf(1f) }
+    var offsetX by rememberSaveable { mutableFloatStateOf(0f) }
+    var offsetY by rememberSaveable { mutableFloatStateOf(0f) }
     var frame by remember { mutableStateOf(IntSize.Zero) }
+    // 裁剪+存盘是一串几百毫秒的重活，处理期间两个按钮都锁掉，防止连点重复提交
+    var cropping by remember { mutableStateOf(false) }
+    val processing = cropping || busy
+    val offset = remember(offsetX, offsetY) { Offset(offsetX, offsetY) }
     val image = remember(source) { source.asImageBitmap() }
     Dialog(
         onDismissRequest = onCancel,
@@ -80,10 +96,8 @@ fun WallpaperCropDialog(
                             val maxX = ((source.width * cover - frameW) / 2f).coerceAtLeast(0f)
                             val maxY = ((source.height * cover - frameH) / 2f).coerceAtLeast(0f)
                             scale = nextScale
-                            offset = Offset(
-                                (offset.x + pan.x).coerceIn(-maxX, maxX),
-                                (offset.y + pan.y).coerceIn(-maxY, maxY)
-                            )
+                            offsetX = (offsetX + pan.x).coerceIn(-maxX, maxX)
+                            offsetY = (offsetY + pan.y).coerceIn(-maxY, maxY)
                         }
                     }
             ) {
@@ -114,21 +128,36 @@ fun WallpaperCropDialog(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    TextButton(onClick = onCancel) { Text("取消", color = Color.White) }
-                    TextButton(onClick = {
-                        if (frame.width > 0 && frame.height > 0) {
-                            onConfirm(
-                                renderWallpaper(
-                                    source,
-                                    frame.width.toFloat(),
-                                    frame.height.toFloat(),
-                                    scale,
-                                    offset.x,
-                                    offset.y
-                                )
-                            )
-                        }
-                    }) { Text("使用这张", color = Color.White) }
+                    TextButton(onClick = onCancel, enabled = !processing) { Text("取消", color = Color.White) }
+                    TextButton(
+                        onClick = {
+                            if (processing || frame.width <= 0 || frame.height <= 0) return@TextButton
+                            cropping = true
+                            scope.launch {
+                                try {
+                                    // 分配 1080×2400 ARGB_8888 + 软件 Canvas 整块 blit，
+                                    // 放主线程就是几百毫秒的整屏冻结，交给 Default 线程池
+                                    val cropped = withContext(Dispatchers.Default) {
+                                        renderWallpaper(
+                                            source,
+                                            frame.width.toFloat(),
+                                            frame.height.toFloat(),
+                                            scale,
+                                            offsetX,
+                                            offsetY
+                                        )
+                                    }
+                                    onConfirm(cropped)
+                                } finally {
+                                    // 协程被旋转取消时也要解锁，否则按钮永久灰着
+                                    cropping = false
+                                }
+                            }
+                        },
+                        enabled = !processing
+                    ) {
+                        Text(if (processing) "处理中…" else "使用这张", color = Color.White)
+                    }
                 }
             }
             Text(

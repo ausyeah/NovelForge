@@ -29,22 +29,39 @@ fun buildQuestionPack(
         }
     }
     val terms = questionTerms(question, corpus)
+    // 按「命中总次数」排序再取前 4。以前是按大纲顺序取前 4 个含有任意一个
+    // 二字组的章节 —— 问「第 300 章」时拿回来的可能是第 1 章里一句无关的巧合重叠。
     val related = ordered.mapNotNull { item ->
         val revision = latest[item.id]
         val haystack = item.title + item.summary + revision?.content.orEmpty()
-        val term = terms.firstOrNull { haystack.contains(it) } ?: return@mapNotNull null
+        val hits = terms.sumOf { term -> haystack.countOccurrencesOf(term) }
+        if (hits == 0) return@mapNotNull null
+        val term = terms.maxByOrNull { candidate -> haystack.countOccurrencesOf(candidate) }
+            ?: return@mapNotNull null
         val source = revision?.content?.takeIf { it.contains(term) } ?: item.summary
-        Excerpt(item, excerptAround(source, term))
-    }.take(4)
-    val outlineText = ordered.joinToString("\n") { item ->
-        "${chapterLabel(item.orderIndex)} ${item.title}：${item.summary.take(80)}"
-    }.ifBlank { "还没有大纲" }
+        Excerpt(item, excerptAround(source, term), hits)
+    }.sortedByDescending { it.hits }.take(4)
+    // 大纲不能全发。1500 章 × 80 字概要 ≈ 12 万字符，比任何中文网关的上下文都大，
+    // 表现为「这本书它好像不认识」。只发命中章 + 最近若干章，其余用一句话概括规模。
+    val hitIds = related.mapTo(HashSet()) { it.item.id }
+    val tail = ordered.takeLast(OUTLINE_TAIL_CHAPTERS).map { it.id }
+    val outlineLines = ordered.filter { it.id in hitIds || it.id in tail }
+        .map { item -> "${chapterLabel(item.orderIndex)} ${item.title}：${item.summary.take(80)}" }
+    val omittedOutline = ordered.size - outlineLines.size
+    val outlineText = buildString {
+        append(outlineLines.joinToString("\n").ifBlank { "还没有大纲" })
+        if (omittedOutline > 0) {
+            append("\n（全书共 ${ordered.size} 章，这里只列出了最近 $OUTLINE_TAIL_CHAPTERS 章")
+            append("和问题相关的 ${hitIds.size} 章，省略了中间 $omittedOutline 章的概要）")
+        }
+    }
     val relatedText = if (related.isEmpty()) {
         "没有命中的正文片段。请只根据大纲回答，不知道就说不确定。"
     } else {
         related.joinToString("\n") { "《${it.item.title}》：${it.text}" }
     }
     val prompt = """
+        【作品】《书名以提问者所在的书为准》
         【大纲】
         $outlineText
 
@@ -54,7 +71,21 @@ fun buildQuestionPack(
     return QuestionPack(prompt, ordered.size, related.size)
 }
 
-private data class Excerpt(val item: OutlineItem, val text: String)
+private data class Excerpt(val item: OutlineItem, val text: String, val hits: Int)
+
+private fun String.countOccurrencesOf(needle: String): Int {
+    if (needle.isEmpty()) return 0
+    var count = 0
+    var index = indexOf(needle)
+    while (index >= 0) {
+        count++
+        index = indexOf(needle, index + needle.length)
+    }
+    return count
+}
+
+/** 大纲全量会撑爆上下文，只保留最近这么多章。 */
+private const val OUTLINE_TAIL_CHAPTERS = 30
 
 internal fun questionTerms(question: String, corpus: String): List<String> {
     val compact = question.filter { !it.isWhitespace() }

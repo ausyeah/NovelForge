@@ -3,9 +3,11 @@ package com.novelforge.app.data.repository
 import androidx.room.withTransaction
 import com.novelforge.app.data.local.AppDatabase
 import com.novelforge.app.data.local.ProjectDao
+import com.novelforge.app.data.local.encodeContinuityState
 import com.novelforge.app.data.local.orFallback
 import com.novelforge.app.data.local.toDomain
 import com.novelforge.app.data.local.toEntity
+import com.novelforge.app.domain.model.ContinuityState
 import com.novelforge.app.domain.model.Project
 import com.novelforge.app.domain.repository.ProjectRepository
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +26,14 @@ class RoomProjectRepository(private val database: AppDatabase) : ProjectReposito
 
     override suspend fun saveProject(project: Project) {
         dao.upsert(project.toEntity())
+    }
+
+    override suspend fun mutateContinuity(id: String, block: (ContinuityState) -> ContinuityState) {
+        database.withTransaction {
+            val current = dao.findById(id) ?: return@withTransaction
+            val next = block(current.toDomain().continuityState)
+            dao.updateContinuityJson(id, encodeContinuityState(next), System.currentTimeMillis())
+        }
     }
 
     override suspend fun deleteProject(id: String) {

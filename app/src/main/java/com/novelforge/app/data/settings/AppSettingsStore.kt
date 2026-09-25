@@ -20,13 +20,12 @@ data class AppSettings(
     val outputBudget: Int = 5_000,
     val costConfirmationEnabled: Boolean = true,
     val disableThinking: Boolean = true,
-    val autoRunEnabled: Boolean = false,
     /** 主题模式：system / light / dark */
     val themeMode: String = "system",
     /** 空字符串表示不使用自定义壁纸 */
     val wallpaperFileName: String = "",
     /** 壁纸上的纸色遮罩，0–100，越大字越清楚 */
-    val wallpaperDim: Int = 62
+    val wallpaperDim: Int = 75
 )
 
 class AppSettingsStore(private val context: Context) {
@@ -43,7 +42,6 @@ class AppSettingsStore(private val context: Context) {
             preferences[OUTPUT_BUDGET] = next.outputBudget
             preferences[COST_CONFIRMATION] = next.costConfirmationEnabled
             preferences[DISABLE_THINKING] = next.disableThinking
-            preferences[AUTO_RUN_ENABLED] = next.autoRunEnabled
             preferences[THEME_MODE] = next.themeMode
             preferences[WALLPAPER_FILE] = next.wallpaperFileName
             preferences[WALLPAPER_DIM] = next.wallpaperDim
@@ -59,10 +57,11 @@ class AppSettingsStore(private val context: Context) {
         outputBudget = preferences[OUTPUT_BUDGET] ?: 5_000,
         costConfirmationEnabled = preferences[COST_CONFIRMATION] ?: true,
         disableThinking = preferences[DISABLE_THINKING] ?: true,
-        autoRunEnabled = preferences[AUTO_RUN_ENABLED] ?: false,
         themeMode = preferences[THEME_MODE] ?: "system",
         wallpaperFileName = preferences[WALLPAPER_FILE].orEmpty(),
-        wallpaperDim = (preferences[WALLPAPER_DIM] ?: 62).coerceIn(35, 90)
+        // 区间跟着 Theme.wallpaperDimRange 对齐：亮色下限 0.75、暗色 0.60，
+        // 上限 0.95。这里还按旧的 35–90 夹的话，滑块永远够不到新的上端。
+        wallpaperDim = (preferences[WALLPAPER_DIM] ?: 75).coerceIn(60, 95)
     )
 
     private companion object {
@@ -72,7 +71,6 @@ class AppSettingsStore(private val context: Context) {
         val OUTPUT_BUDGET = intPreferencesKey("output_budget")
         val COST_CONFIRMATION = booleanPreferencesKey("cost_confirmation")
         val DISABLE_THINKING = booleanPreferencesKey("disable_thinking")
-        val AUTO_RUN_ENABLED = booleanPreferencesKey("auto_run_enabled")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val WALLPAPER_FILE = stringPreferencesKey("wallpaper_file")
         val WALLPAPER_DIM = intPreferencesKey("wallpaper_dim")

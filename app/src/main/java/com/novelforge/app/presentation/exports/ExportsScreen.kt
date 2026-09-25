@@ -99,7 +99,9 @@ object ExportStore {
     fun read(context: Context, file: ExportedTxt): String =
         runCatching {
             context.contentResolver.openInputStream(file.uri)?.use { stream ->
-                stream.readBytes().toString(Charsets.UTF_8)
+                // 导出会写 UTF-8 BOM（Windows 记事本/WordPad 需要它才不乱码），
+                // 预览里要摘掉，否则正文前面多一个零宽字符
+                stream.readBytes().toString(Charsets.UTF_8).removePrefix("\uFEFF")
             }.orEmpty()
         }.getOrDefault("（文件读取失败）")
 

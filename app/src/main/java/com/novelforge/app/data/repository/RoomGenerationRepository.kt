@@ -30,8 +30,8 @@ class RoomGenerationRepository(
 
     override suspend fun findById(id: String): GenerationJob? = dao.findById(id)?.toDomain()
 
-    override suspend fun findByClientRequestId(clientRequestId: String): GenerationJob? =
-        dao.findByClientRequestId(clientRequestId)?.toDomain()
+    override suspend fun findByClientRequestId(projectId: String, clientRequestId: String): GenerationJob? =
+        dao.findByClientRequestId(projectId, clientRequestId)?.toDomain()
 
     override suspend fun findActiveJob(projectId: String, purpose: String, targetId: String?): GenerationJob? =
         dao.findActive(projectId, purpose, targetId)?.toDomain()
@@ -61,6 +61,31 @@ class RoomGenerationRepository(
             dao.upsert(job.toEntity())
             true
         }
+
+    /**
+     * 落库时如果这行已经不存在就什么都不做。
+     * 「全新重生成大纲」会先删掉这本书的旧任务；此时还在飞行中的 worker
+     * 如果用 upsert 收尾，REPLACE 会把已删除的行重新插回来，
+     * 旧正文就会挂回新目录 —— 这就是「小说之间串」最直接的一种形态。
+     */
+    override suspend fun updateJobIfExists(job: GenerationJob): Boolean {
+        val row = job.toEntity()
+        return dao.updateIfExists(
+            id = row.id,
+            targetId = row.targetId,
+            purpose = row.purpose,
+            status = row.status,
+            clientRequestId = row.clientRequestId,
+            attempt = row.attempt,
+            partialContent = row.partialContent,
+            promptSnapshotId = row.promptSnapshotId,
+            lastCheckpointAt = row.lastCheckpointAt,
+            errorType = row.errorType,
+            errorMessage = row.errorMessage,
+            createdAt = row.createdAt,
+            updatedAt = row.updatedAt
+        ) > 0
+    }
 
     override suspend fun deleteAllJobs(projectId: String) {
         dao.deleteForProject(projectId)

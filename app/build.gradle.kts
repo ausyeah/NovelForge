@@ -8,6 +8,12 @@ plugins {
     alias(libs.plugins.ksp)
 }
 
+// Room 导出 schema JSON：MigrationTestHelper 靠这些文件建旧版库并校验迁移结果，
+// 没有它就没有任何东西能证明「迁移后的库 == 当前实体定义」。
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 // Kotlin 2.x writes Android unit-test classes to tmp/kotlin-classes; keep the
 // AGP test task's class directory explicit so JUnit can discover Kotlin tests.
 tasks.withType<Test>().configureEach {
@@ -67,6 +73,13 @@ android {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
 
+    // 迁移测试要读 assets 里的历史 schema（app/schemas/<数据库类名>/<版本>.json）
+    sourceSets {
+        getByName("androidTest") {
+            assets.srcDir("$projectDir/schemas")
+        }
+    }
+
     applicationVariants.all {
         outputs.all {
             (this as com.android.build.gradle.internal.api.BaseVariantOutputImpl).outputFileName =
@@ -98,6 +111,8 @@ dependencies {
     testImplementation(libs.okhttp.mockwebserver)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.bundles.testing)
+    // 迁移测试要用 MigrationTestHelper 真正建一个 v1 库再跑迁移
+    androidTestImplementation("androidx.room:room-testing:2.7.0")
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
 }

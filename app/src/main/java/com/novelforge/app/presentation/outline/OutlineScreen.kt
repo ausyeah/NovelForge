@@ -20,6 +20,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
@@ -31,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
@@ -57,7 +59,7 @@ private val REPAIRABLE_STATUSES = setOf(
     GenerationJobStatus.CANCELLED
 )
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun OutlineScreen(
     projectTitle: String,
@@ -123,6 +125,8 @@ fun OutlineScreen(
     var undoSlot by remember(outline?.id) { mutableStateOf<Pair<String, OutlineItem>?>(null) }
     var regenTarget by remember { mutableStateOf<OutlineItem?>(null) }
     var reverseOrder by remember { mutableStateOf(true) }
+    // 「问问这本书」降级到这里：按需工具，不占主循环的位置
+    var toolsOpen by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(wandResult) {
         val result = wandResult ?: return@LaunchedEffect
         onConsumeWand()
@@ -218,6 +222,7 @@ fun OutlineScreen(
             subtitle = "大纲",
             trailing = {
                 TextButton(onClick = onOpenMemory) { Text("记忆") }
+                TextButton(onClick = { toolsOpen = true }) { Text("更多") }
                 Text("全自动", style = MaterialTheme.typography.bodySmall)
                 Switch(checked = autoRun, onCheckedChange = onToggleAutoRun)
             }
@@ -250,12 +255,6 @@ fun OutlineScreen(
         )
 
         if (!detailOpen) {
-            AgentAssistCard(
-                steps = agentSteps,
-                busy = agentBusy,
-                error = agentError,
-                onAsk = onAskAgent
-            )
             overviewButtons()
         }
         if (error != null) {
@@ -415,6 +414,23 @@ fun OutlineScreen(
                     RawEditorPane(job = job, modifier = Modifier.fillMaxWidth().weight(1f), onSaveRaw = onSaveRaw)
                 }
             }
+        }
+    }
+
+    if (toolsOpen) {
+        ModalBottomSheet(onDismissRequest = { toolsOpen = false }) {
+            AgentAssistCard(
+                steps = agentSteps,
+                busy = agentBusy,
+                error = agentError,
+                onAsk = onAskAgent
+            )
+            Text(
+                "《${projectTitle}》",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(start = 20.dp, end = 20.dp, bottom = 16.dp)
+            )
         }
     }
 

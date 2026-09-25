@@ -43,7 +43,7 @@ class GenerateOutlineUseCase(
     ): QueuedGeneration {
         val project = requireNotNull(projectRepository.getProject(projectId)) { "项目不存在" }
         checkNotNull(project.creativeConfig) { "请先完成创作设置" }
-        val existing = generationRepository.findByClientRequestId(clientRequestId)
+        val existing = generationRepository.findByClientRequestId(projectId, clientRequestId)
         if (existing != null) {
             return QueuedGeneration(
                 existing,

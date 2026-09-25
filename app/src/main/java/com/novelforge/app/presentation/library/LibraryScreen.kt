@@ -289,10 +289,6 @@ private fun ReaderBody(
     }
 }
 
-private object LibraryPendingStore {
-    var target: Project? = null
-}
-
 private val COVER_COLORS = listOf(
     Color(0xFF5B4B8A), Color(0xFF2E6E65), Color(0xFF8A5B4B),
     Color(0xFF3E5C8A), Color(0xFF7A3E5C), Color(0xFF5C7A3E)
@@ -321,7 +317,12 @@ fun LibraryScreen(
     var themeIndex by remember { mutableIntStateOf(0) }
     var fontSize by remember { mutableIntStateOf(18) }
     val readerThemes = listOf(followReaderTheme()) + READER_THEMES
-    var backupTarget by LibraryPendingStore::target
+    // 存 id 而不是 Project 对象，更不能放进程级单槽。
+    // 以前是 `object LibraryPendingStore { var target: Project? }`：单槽、无 key、
+    // 存的是整本书（含完整连续性状态）。SAF 弹窗期间只要再触发一次导出，
+    // 槽里就是最后写入的那本书，而文件名用的是上一次读到的书名 ——
+    // 结果是「B 书的内容写进了名为 A 的文件」。rememberSaveable 还能扛住转屏。
+    var backupProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     var backupMessage by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
@@ -329,8 +330,10 @@ fun LibraryScreen(
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
     ) { uri: Uri? ->
-        val target = backupTarget
-        backupTarget = null
+        val wantedId = backupProjectId
+        backupProjectId = null
+        // 按 id 重新解析，而不是信任上一次存下来的对象
+        val target = projects.firstOrNull { it.id == wantedId }
         if (uri != null && target != null) {
             scope.launch {
                 backupMessage = runCatching {
@@ -563,7 +566,7 @@ fun LibraryScreen(
                     Button(
                         onClick = {
                             actionTarget = null
-                            backupTarget = target
+                            backupProjectId = target.id
                             exportLauncher.launch(app.backupStore.suggestedFileName(target.title))
                         },
                         modifier = Modifier.fillMaxWidth()

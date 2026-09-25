@@ -31,7 +31,7 @@ class GenerateChapterUseCase(
         clientRequestId: String = UUID.randomUUID().toString()
     ): QueuedGeneration {
         val project = requireNotNull(projectRepository.getProject(projectId)) { "项目不存在" }
-        val existing = generationRepository.findByClientRequestId(clientRequestId)
+        val existing = generationRepository.findByClientRequestId(project.id, clientRequestId)
         val job = if (existing != null) {
             existing
         } else {
@@ -83,7 +83,7 @@ class GenerateChapterUseCase(
                 ChatRole.SYSTEM,
                 promptBuilder.buildSystemPrompt(
                     project.creativeConfig ?: com.novelforge.app.domain.model.CreativeConfig(),
-                    context.characters
+                    project.title
                 )
             )
         ) + promptBuilder.buildChapterPrompt(chapter, context, budget)

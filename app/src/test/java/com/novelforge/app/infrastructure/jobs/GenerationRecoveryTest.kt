@@ -180,6 +180,19 @@ class GenerationRecoveryTest {
             updates.add(job)
             return true
         }
+
+        /**
+         * 行已不存在时必须落空。
+         * 生产实现是 UPDATE ... WHERE id=:id（不是 REPLACE），否则「全新重生成大纲」
+         * 删掉的任务会被还在收尾的 worker 重新插回 COMPLETED，旧正文随之挂回新目录。
+         */
+        override suspend fun updateJobIfExists(job: GenerationJob): Boolean {
+            if (!jobs.containsKey(job.id)) return false
+            jobs[job.id] = job
+            states[job.id]?.value = job
+            updates.add(job)
+            return true
+        }
         override suspend fun deleteAllJobs(projectId: String) {
             jobs.keys.filter { jobs[it]?.projectId == projectId }.forEach { key ->
                 states[key]?.value = null
@@ -203,7 +216,7 @@ class GenerationRecoveryTest {
 
         override suspend fun findById(id: String): GenerationJob? = jobs[id]
 
-        override suspend fun findByClientRequestId(clientRequestId: String): GenerationJob? =
+        override suspend fun findByClientRequestId(projectId: String, clientRequestId: String): GenerationJob? =
             jobs.values.firstOrNull { it.clientRequestId == clientRequestId }
 
         override suspend fun findActiveJob(projectId: String, purpose: String, targetId: String?): GenerationJob? =

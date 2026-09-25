@@ -4,6 +4,7 @@ import android.net.Uri
 import android.content.Intent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -113,7 +114,16 @@ fun NovelForgeApp(application: NovelForgeApplication) {
         composable("exports") {
             ExportsScreen(onBack = { navController.popBackStack() })
         }
-        composable("chat") {
+        // 灵感会话按书分桶。route 带 projectId 时绑定到这本书，
+        // 从首页直接进来（不传）就落回全局「灵感」桶 —— 两种都不丢数据。
+        // 这是全 app 唯一一处会把「另一本书的原文」送进模型请求的路径：
+        // 分桶之前，A 书的人设讨论会被整段重发到 B 书的提问里，模型把两本书的人物混成一套。
+        composable(
+            route = "chat?projectId={projectId}",
+            arguments = listOf(
+                navArgument("projectId") { type = NavType.StringType; defaultValue = "" }
+            )
+        ) { entry ->
             val chatViewModel: ChatViewModel = viewModel(
                 factory = ChatViewModel.Factory(
                     settingsStore = application.appSettingsStore,
@@ -123,6 +133,7 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                     llmCallRepository = application.llmCallRepository
                 )
             )
+            chatViewModel.bindProjectScope(entry.arguments?.getString("projectId"))
             ChatScreen(viewModel = chatViewModel, onBack = { navController.popBackStack() })
         }
         composable("library") {
@@ -329,16 +340,23 @@ fun NovelForgeApp(application: NovelForgeApplication) {
             val excludedCharacters by viewModel.excludedCharacters.collectAsStateWithLifecycle()
             val excludedThreads by viewModel.excludedThreads.collectAsStateWithLifecycle()
             val chapter = outlines.firstOrNull()?.chapters?.firstOrNull { it.id == outlineItemId }
-            val memory = book?.let {
-                MemorySelector.select(
-                    it.continuityState,
-                    excludedCharacterIds = excludedCharacters,
-                    excludedThreads = excludedThreads,
-                    inputBudget = it.creativeConfig?.inputBudget ?: 8_000,
-                    chapterHint = chapter?.let { item ->
-                        chapterMemoryHint(item.title, item.summary, item.characterChanges)
-                    }.orEmpty()
-                )
+            // 必须 remember：select 内部要把全部已确认事实排序打分，
+            // 而 continuityState 每写一章就整块换新，不缓存的话每次重组都重算一遍。
+            val continuity = book?.continuityState
+            val inputBudget = book?.creativeConfig?.inputBudget ?: 8_000
+            val chapterHint = chapter?.let { item ->
+                chapterMemoryHint(item.title, item.summary, item.characterChanges)
+            }.orEmpty()
+            val memory = remember(continuity, excludedCharacters, excludedThreads, inputBudget, chapterHint) {
+                continuity?.let {
+                    MemorySelector.select(
+                        it,
+                        excludedCharacterIds = excludedCharacters,
+                        excludedThreads = excludedThreads,
+                        inputBudget = inputBudget,
+                        chapterHint = chapterHint
+                    )
+                }
             }
             // 留洞后 orderIndex 不连续：取"序号更大的下一章"而不是 +1 精确匹配
             val nextChapter = outlines.firstOrNull()?.chapters
@@ -429,6 +447,9 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                 memoryThreads = book?.continuityState?.unresolvedThreads.orEmpty().filter { it.isNotBlank() },
                 excludedThreads = excludedThreads,
                 factCount = memory?.factCount ?: 0,
+                omittedCharacters = memory?.omittedCharacters ?: 0,
+                omittedThreads = memory?.omittedThreads ?: 0,
+                omittedRules = memory?.omittedRules ?: 0,
                 pendingCount = book?.continuityState?.pendingFacts?.size ?: 0,
                 onToggleCharacter = viewModel::toggleCharacter,
                 onToggleThread = viewModel::toggleThread,

@@ -5,6 +5,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -14,6 +15,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -36,7 +41,17 @@ fun PaperTopBar(
                 text = "返回",
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
+                    // 全应用每一页都在用的返回入口，原来只有约 30×36dp，
+                    // 两个方向都低于 48dp 最小点击区，胖手指/单手握持基本点不中。
+                    // 补到 48dp 见方；代价只是标题左边多空出十几 dp。
+                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                     .clickable(onClick = onBack)
+                    // Text + clickable 默认没有 button 角色，TalkBack 只念一句「返回」
+                    // 像是静态文字；contentDescription 保留可见文案再补足语义（WCAG 2.5.3）
+                    .semantics {
+                        role = Role.Button
+                        contentDescription = "返回上一页"
+                    }
                     .padding(vertical = 8.dp, horizontal = 2.dp),
                 color = MaterialTheme.colorScheme.primary,
                 style = MaterialTheme.typography.labelLarge

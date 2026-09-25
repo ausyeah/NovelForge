@@ -30,6 +30,9 @@ private inline fun <reified T> decodeOr(raw: String?, fallback: T): T {
     return runCatching { mapperJson.decodeFromString<T>(raw) }.getOrDefault(fallback)
 }
 
+/** 只更新记忆这一列时用；JSON 配置必须和 toEntity 保持一致，否则字段会丢。 */
+fun encodeContinuityState(state: ContinuityState): String = mapperJson.encodeToString(state)
+
 fun ProjectEntity.toDomain(): Project = Project(
     id = id,
     title = title,

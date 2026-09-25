@@ -17,6 +17,10 @@ interface ProjectDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(project: ProjectEntity)
 
+    /** 只改记忆这一列：整行 REPLACE 会把并发写进来的其他字段一起顶掉。 */
+    @Query("UPDATE projects SET continuityStateJson = :json, updatedAt = :updatedAt WHERE id = :id")
+    suspend fun updateContinuityJson(id: String, json: String, updatedAt: Long)
+
     @Query("DELETE FROM projects WHERE id = :id")
     suspend fun deleteById(id: String)
 }
@@ -106,8 +110,11 @@ interface GenerationJobDao {
     @Query("SELECT * FROM generation_jobs WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): GenerationJobEntity?
 
-    @Query("SELECT * FROM generation_jobs WHERE clientRequestId = :clientRequestId LIMIT 1")
-    suspend fun findByClientRequestId(clientRequestId: String): GenerationJobEntity?
+    // 必须带 projectId：这个查询被当作「这个请求已经建过任务」的判据，
+    // 命中就直接复用那条任务。漏掉书过滤时，一旦 id 撞上就会拿到别的书的 job，
+    // 然后拿它的 projectId 去建请求、去落库。
+    @Query("SELECT * FROM generation_jobs WHERE projectId = :projectId AND clientRequestId = :clientRequestId LIMIT 1")
+    suspend fun findByClientRequestId(projectId: String, clientRequestId: String): GenerationJobEntity?
 
     @Query(
         "SELECT * FROM generation_jobs " +
@@ -151,6 +158,33 @@ interface GenerationJobDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun upsert(job: GenerationJobEntity)
+
+    /**
+     * 只更新已存在的行。`upsert` 是 REPLACE，落在被删掉的行上等于 INSERT，
+     * 会把「全新重生成大纲」已经清掉的任务复活成 COMPLETED，并连带把旧正文写回新目录。
+     */
+    @Query(
+        "UPDATE generation_jobs SET targetId = :targetId, purpose = :purpose, status = :status, " +
+            "clientRequestId = :clientRequestId, attempt = :attempt, partialContent = :partialContent, " +
+            "promptSnapshotId = :promptSnapshotId, lastCheckpointAt = :lastCheckpointAt, " +
+            "errorType = :errorType, errorMessage = :errorMessage, createdAt = :createdAt, " +
+            "updatedAt = :updatedAt WHERE id = :id"
+    )
+    suspend fun updateIfExists(
+        id: String,
+        targetId: String?,
+        purpose: String,
+        status: String,
+        clientRequestId: String,
+        attempt: Int,
+        partialContent: String,
+        promptSnapshotId: String,
+        lastCheckpointAt: Long?,
+        errorType: String?,
+        errorMessage: String?,
+        createdAt: Long,
+        updatedAt: Long
+    ): Int
 
     @Query("DELETE FROM generation_jobs WHERE projectId = :projectId")
     suspend fun deleteForProject(projectId: String)

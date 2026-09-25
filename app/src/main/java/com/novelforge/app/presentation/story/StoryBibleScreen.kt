@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -17,6 +18,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -29,14 +31,24 @@ import com.novelforge.app.domain.model.ContinuityFact
 import com.novelforge.app.domain.model.ContinuityState
 import com.novelforge.app.domain.model.Project
 import com.novelforge.app.domain.repository.ProjectRepository
+import com.novelforge.app.infrastructure.llm.MemorySelector
+import com.novelforge.app.infrastructure.llm.statementSimilarity
 import com.novelforge.app.presentation.common.PaperTopBar
 import com.novelforge.app.ui.theme.PaperButton
 import com.novelforge.app.ui.theme.PaperSurface
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.UUID
+
+/** 一条待确认记忆的两种结局分开建模：成功提示会自动消失，错误不能。 */
+sealed interface StoryBibleEvent {
+    data class Saved(val text: String) : StoryBibleEvent
+    data class Failed(val text: String) : StoryBibleEvent
+}
 
 class StoryBibleViewModel(
     private val projectId: String,
@@ -46,75 +58,146 @@ class StoryBibleViewModel(
         .map { list -> list.firstOrNull { it.id == projectId } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    private val _message = kotlinx.coroutines.flow.MutableStateFlow<String?>(null)
-    val message = _message
+    private val _event = MutableStateFlow<StoryBibleEvent?>(null)
+    val event = _event.asStateFlow()
 
     fun saveDraft(characters: List<CharacterProfile>, rules: List<String>, threads: List<String>) {
-        val current = project.value ?: return
         viewModelScope.launch {
             runCatching {
-                repository.saveProject(
-                    current.copy(
-                        continuityState = current.continuityState.copy(
-                            characters = characters.filter { it.name.isNotBlank() },
-                            worldRules = rules,
-                            unresolvedThreads = threads
-                        ),
-                        updatedAt = System.currentTimeMillis()
+                repository.mutateContinuity(projectId) { state ->
+                    state.copy(
+                        characters = characters.filter { it.name.isNotBlank() },
+                        worldRules = rules,
+                        unresolvedThreads = threads
                     )
-                )
-            }.onSuccess { _message.value = "已写入这本书的记忆" }
-                .onFailure { _message.value = it.message ?: "保存失败" }
+                }
+            }.onSuccess { _event.value = StoryBibleEvent.Saved("已写入这本书的记忆") }
+                .onFailure { _event.value = StoryBibleEvent.Failed(it.message ?: "保存失败") }
         }
     }
 
     fun accept(fact: ContinuityFact, kind: String) {
-        updatePending(fact.id) { state ->
-            val statement = fact.statement.trim()
-            when (kind) {
-                "thread" -> state.copy(
-                    unresolvedThreads = (state.unresolvedThreads + statement).distinct()
-                )
-                "resolved" -> state.copy(
-                    unresolvedThreads = state.unresolvedThreads.filterNot {
-                        it == statement || statement.contains(it) || it.contains(statement)
-                    },
-                    timelineEvents = (state.timelineEvents + "已解决：$statement").takeLast(40)
-                )
-                else -> state.copy(
-                    factsWithSources = state.factsWithSources + fact.copy(
-                        kind = "fact",
-                        confirmed = true,
-                        updatedAt = System.currentTimeMillis()
-                    )
-                )
-            }
-        }
+        mutate(fact.id, successText = "已记入本书记忆") { state -> applyAccept(state, fact, kind) }
     }
 
     fun discard(fact: ContinuityFact) {
-        updatePending(fact.id) { it }
+        mutate(fact.id, successText = null) { it }
     }
 
-    private fun updatePending(factId: String, transform: (ContinuityState) -> ContinuityState) {
-        val current = project.value ?: return
+    /** 一键处理剩下的待确认条目。攒到上限就会静默丢弃，所以必须给一条出路。 */
+    fun acceptAllPending(kind: String) {
         viewModelScope.launch {
             runCatching {
-                val state = transform(current.continuityState)
-                repository.saveProject(
-                    current.copy(
-                        continuityState = state.copy(
-                            pendingFacts = state.pendingFacts.filterNot { it.id == factId }
-                        ),
-                        updatedAt = System.currentTimeMillis()
-                    )
-                )
-            }.onFailure { _message.value = it.message ?: "没能更新记忆" }
+                repository.mutateContinuity(projectId) { state ->
+                    state.pendingFacts
+                        .filter { it.kind == kind || (kind == "fact" && it.kind != "thread" && it.kind != "resolved") }
+                        .fold(state) { acc, fact -> applyAccept(acc, fact, kind) }
+                        .let { next -> next.copy(pendingFacts = next.pendingFacts.filterNot { it.kind == kind }) }
+                }
+            }.onSuccess { _event.value = StoryBibleEvent.Saved("已批量处理待确认条目") }
+                .onFailure { _event.value = StoryBibleEvent.Failed(it.message ?: "批量处理失败") }
         }
     }
 
-    fun clearMessage() {
-        _message.value = null
+    fun discardAllPending() {
+        viewModelScope.launch {
+            runCatching {
+                repository.mutateContinuity(projectId) { it.copy(pendingFacts = emptyList()) }
+            }.onSuccess { _event.value = StoryBibleEvent.Saved("已清空待确认条目") }
+                .onFailure { _event.value = StoryBibleEvent.Failed(it.message ?: "清空失败") }
+        }
+    }
+
+    /** 置顶：让这条设定每章都带，且排在最前面，不受新旧排序影响。 */
+    fun togglePin(fact: ContinuityFact) {
+        mutate(null, successText = null) { state ->
+            state.copy(
+                factsWithSources = state.factsWithSources.map {
+                    if (it.id == fact.id) it.copy(pinned = !it.pinned) else it
+                }
+            )
+        }
+    }
+
+    fun forget(fact: ContinuityFact) {
+        mutate(null, successText = null) { state ->
+            state.copy(factsWithSources = state.factsWithSources.filterNot { it.id == fact.id })
+        }
+    }
+
+    fun clearEvent() {
+        _event.value = null
+    }
+
+    /**
+     * 确认一条待确认记忆。说的是同一件事的旧设定会被顶掉，
+     * 免得两条互相矛盾的事实一起占名额、还一起发给模型。
+     *
+     * 判定分两级：
+     * 1. 主体+属性名相同 —— 精确、可信。抽记忆时要求模型给出这两个字段，
+     *    「沈砚/左臂状态」从「已断」变成「已接上」就是同一格里的新值。
+     * 2. 词面高度重合 —— 兜底，覆盖旧数据（没有 subject/predicate）和伏笔。
+     *    阈值只能定在 0.6 这种「近乎重复」的水平：真实的矛盾对
+     *    （左臂已断 vs 左臂已接上）词面只有 0.30，而不同角色的事也有 0.10，
+     *    调低阈值会把不相干的设定互相吃掉。
+     */
+    private fun applyAccept(
+        state: ContinuityState,
+        fact: ContinuityFact,
+        kind: String
+    ): ContinuityState {
+        val statement = fact.statement.trim()
+        val promoted = fact.copy(
+            id = UUID.randomUUID().toString(),
+            kind = "fact",
+            confirmed = true,
+            updatedAt = System.currentTimeMillis()
+        )
+        val hasSubject = promoted.subject.isNotBlank() && promoted.predicate.isNotBlank()
+        val kept = state.factsWithSources.filterNot { old ->
+            when {
+                old.statement == statement -> true
+                hasSubject && old.subject == promoted.subject && old.predicate == promoted.predicate -> true
+                else -> statementSimilarity(old.statement, statement) >= SUPERSEDE_THRESHOLD
+            }
+        }
+        return when (kind) {
+            "thread" -> state.copy(
+                unresolvedThreads = (state.unresolvedThreads + statement).distinct()
+            )
+            "resolved" -> state.copy(
+                unresolvedThreads = state.unresolvedThreads.filterNot {
+                    it == statement || statement.contains(it) || it.contains(statement)
+                },
+                timelineEvents = (state.timelineEvents + "已解决：$statement").takeLast(40)
+            )
+            else -> state.copy(factsWithSources = kept + promoted)
+        }
+    }
+
+    /**
+     * 事务内读-改-写。factId 非空时顺手把这条从待确认里摘掉。
+     * 不能沿用「读一份 project 快照 → 改 → 整行 REPLACE」：章后抽记忆和用户点确认
+     * 是并发的两条路径，整行覆盖会让后写的一方把先写的一方刚存的记忆整段抹掉。
+     */
+    private fun mutate(
+        factId: String?,
+        successText: String?,
+        transform: (ContinuityState) -> ContinuityState
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                repository.mutateContinuity(projectId) { state ->
+                    val next = transform(state)
+                    if (factId == null) next
+                    else next.copy(pendingFacts = next.pendingFacts.filterNot { it.id == factId })
+                }
+            }.onSuccess {
+                if (successText != null) _event.value = StoryBibleEvent.Saved(successText)
+            }.onFailure {
+                _event.value = StoryBibleEvent.Failed(it.message ?: "没能更新记忆")
+            }
+        }
     }
 
     class Factory(
@@ -125,6 +208,18 @@ class StoryBibleViewModel(
         override fun <T : ViewModel> create(modelClass: Class<T>): T =
             StoryBibleViewModel(projectId, repository) as T
     }
+
+    private companion object {
+        /**
+         * 词面去重阈值。这是**兜底**，矛盾主要靠 subject+predicate 精确判定。
+         *
+         * 0.6 只能命中近乎逐字重复 —— 真实的矛盾对（「左臂已断，不能再持剑」
+         * vs「左臂已经接上，可以持剑了」）词面只有 0.30，而不同角色的事
+         * （「阿禾丢了玉佩」vs「白露在城南开了一间药铺」）也有 0.10。
+         * 调低它去抓矛盾，会把不相干的设定互相吃掉，那是更糟的错误。
+         */
+        const val SUPERSEDE_THRESHOLD = 0.6
+    }
 }
 
 @Composable
@@ -133,7 +228,7 @@ fun StoryBibleScreen(
     onBack: () -> Unit
 ) {
     val project by viewModel.project.collectAsStateWithLifecycle()
-    val message by viewModel.message.collectAsStateWithLifecycle()
+    val event by viewModel.event.collectAsStateWithLifecycle()
     val current = project
     if (current == null) {
         Column(Modifier.fillMaxSize().padding(20.dp)) {
@@ -142,26 +237,34 @@ fun StoryBibleScreen(
         }
         return
     }
-    StoryBibleEditor(project = current, message = message, viewModel = viewModel, onBack = onBack)
+    StoryBibleEditor(project = current, event = event, viewModel = viewModel, onBack = onBack)
 }
 
 @Composable
 private fun StoryBibleEditor(
     project: Project,
-    message: String?,
+    event: StoryBibleEvent?,
     viewModel: StoryBibleViewModel,
     onBack: () -> Unit
 ) {
     val state = project.continuityState
-    var rules by remember(project.id) { mutableStateOf(state.worldRules.joinToString("\n")) }
-    var threads by remember(project.id) { mutableStateOf(state.unresolvedThreads.joinToString("\n")) }
+    var rules by rememberSaveable(project.id) { mutableStateOf(state.worldRules.joinToString("\n")) }
+    var threads by rememberSaveable(project.id) { mutableStateOf(state.unresolvedThreads.joinToString("\n")) }
     var characters by remember(project.id) { mutableStateOf(state.characters) }
-    LaunchedEffect(message) {
-        if (message != null) {
+    // 队列最多 40 条。以前只渲染最后 12 条又没有「展开」，
+    // 于是另外 28 条在界面上根本不存在，用户永远处理不掉，
+    // 下一章又被 takeLast(40) 悄悄挤掉 —— 记忆就这么攒不起来。
+    var showAllPending by rememberSaveable { mutableStateOf(false) }
+    // 只有成功提示自动消失；错误 1.6 秒后就没人看得见了
+    LaunchedEffect(event) {
+        if (event is StoryBibleEvent.Saved) {
             kotlinx.coroutines.delay(1_600)
-            viewModel.clearMessage()
+            viewModel.clearEvent()
         }
     }
+    val pendingVisible = if (showAllPending) state.pendingFacts else state.pendingFacts.takeLast(12)
+    val hiddenPending = (state.pendingFacts.size - pendingVisible.size).coerceAtLeast(0)
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -170,12 +273,25 @@ private fun StoryBibleEditor(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         PaperTopBar(title = "本书记忆", subtitle = "确认之后才会进入下一章", onBack = onBack)
-        message?.let {
-            Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodySmall)
+        when (val current2 = event) {
+            is StoryBibleEvent.Saved -> Text(
+                current2.text,
+                color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.bodySmall
+            )
+            is StoryBibleEvent.Failed -> Text(
+                current2.text,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall
+            )
+            null -> Unit
         }
         if (state.pendingFacts.isNotEmpty()) {
-            Text("待确认", style = MaterialTheme.typography.titleSmall)
-            state.pendingFacts.takeLast(12).asReversed().forEach { fact ->
+            Text(
+                "待确认 ${state.pendingFacts.size} 条",
+                style = MaterialTheme.typography.titleSmall
+            )
+            pendingVisible.asReversed().forEach { fact ->
                 PaperSurface(modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Text(fact.statement, style = MaterialTheme.typography.bodyMedium)
@@ -197,8 +313,51 @@ private fun StoryBibleEditor(
                     }
                 }
             }
+            if (hiddenPending > 0 || showAllPending) {
+                TextButton(onClick = { showAllPending = !showAllPending }) {
+                    Text(if (showAllPending) "只看最新 12 条" else "还有 $hiddenPending 条，全部展开")
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                TextButton(onClick = { viewModel.acceptAllPending("fact") }) { Text("全部记成事实") }
+                TextButton(onClick = { viewModel.discardAllPending() }) { Text("全部丢掉") }
+            }
+        }
+        if (state.factsWithSources.isNotEmpty()) {
+            Text(
+                "已确认事实 ${state.factsWithSources.size} 条",
+                style = MaterialTheme.typography.titleSmall
+            )
+            Text(
+                "每章只带 ${MemorySelector.MAX_FACTS} 条。置顶的永远带上，其余按和本章的相关度取。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            state.factsWithSources.asReversed().take(30).forEach { fact ->
+                PaperSurface(modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(fact.statement, style = MaterialTheme.typography.bodyMedium)
+                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            FilterChip(
+                                selected = fact.pinned,
+                                onClick = { viewModel.togglePin(fact) },
+                                label = { Text(if (fact.pinned) "已置顶" else "置顶") }
+                            )
+                            TextButton(onClick = { viewModel.forget(fact) }) { Text("不再记住") }
+                        }
+                    }
+                }
+            }
         }
         Text("不能违反的规则", style = MaterialTheme.typography.titleSmall)
+        if (state.worldRules.size > MemorySelector.MAX_RULES) {
+            Text(
+                "有 ${state.worldRules.size} 条，每章只带 ${MemorySelector.MAX_RULES} 条，" +
+                    "本章用不上的会被落选。建议拆成几本书或合并。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         OutlinedTextField(
             value = rules,
             onValueChange = { rules = it },
@@ -207,6 +366,14 @@ private fun StoryBibleEditor(
             label = { Text("一行一条") }
         )
         Text("还没收的伏笔", style = MaterialTheme.typography.titleSmall)
+        if (state.unresolvedThreads.size > MemorySelector.MAX_THREADS) {
+            Text(
+                "有 ${state.unresolvedThreads.size} 条，每章只带 ${MemorySelector.MAX_THREADS} 条，" +
+                    "最近新增的优先。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         OutlinedTextField(
             value = threads,
             onValueChange = { threads = it },
@@ -262,6 +429,22 @@ private fun CharacterEditor(
                 modifier = Modifier.fillMaxWidth()
             )
             OutlinedTextField(
+                value = character.aliases.joinToString("、"),
+                onValueChange = { raw ->
+                    onChange(
+                        character.copy(
+                            aliases = raw.split("、", "，", ",")
+                                .map { it.trim() }
+                                .filter { it.isNotEmpty() && it != character.name }
+                        )
+                    )
+                },
+                label = { Text("别名 / 称号（顿号分隔）") },
+                supportingText = { Text("本章概要里出现别名也算点名，否则带不回这个角色") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
                 value = character.appearance,
                 onValueChange = { onChange(character.copy(appearance = it)) },
                 label = { Text("外貌") },
@@ -277,6 +460,13 @@ private fun CharacterEditor(
                 value = character.motivation,
                 onValueChange = { onChange(character.copy(motivation = it)) },
                 label = { Text("动机") },
+                modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = character.abilities,
+                onValueChange = { onChange(character.copy(abilities = it)) },
+                label = { Text("当前状态 / 能力限制") },
+                supportingText = { Text("受伤、失去的东西写这里，它会随角色档案一起发给模型") },
                 modifier = Modifier.fillMaxWidth()
             )
             TextButton(onClick = onDelete) { Text("删除这个角色") }

@@ -90,4 +90,12 @@ class RoomGenerationArtifactRepository(
             database.llmCallDao().insert(call.toEntity())
         }
     }
+
+    override suspend fun wipeChapterArtifacts(projectId: String) {
+        database.withTransaction {
+            database.chapterRevisionDao().deleteForProject(projectId)
+            database.generationJobDao().deleteForProject(projectId)
+            database.promptSnapshotDao().deleteOrphans()
+        }
+    }
 }

@@ -54,6 +54,8 @@ class NovelForgeApplication : Application(), GenerationWorkerDependenciesProvide
     val llmCallRepository by lazy { RoomLlmCallRepository(database.llmCallDao()) }
     val apiKeyStore by lazy { KeystoreApiKeyStore(this) }
     val appSettingsStore by lazy { AppSettingsStore(this) }
+    // 一键全自动按书存：全局单值会让 A 书的开关去驱动 B 书的自动续写
+    val autoRunStore by lazy { com.novelforge.app.data.settings.AutoRunStore(this) }
     val modelPresetStore by lazy { ModelPresetStore(this, apiKeyStore) }
     val agentTraceStore by lazy { AgentTraceStore(this) }
     private val bookStore by lazy {
@@ -99,6 +101,7 @@ class NovelForgeApplication : Application(), GenerationWorkerDependenciesProvide
             promptSnapshotRepository = promptSnapshotRepository,
             llmCallRepository = llmCallRepository,
             settingsStore = appSettingsStore,
+            autoRunStore = autoRunStore,
             apiKeyStore = apiKeyStore
         )
     }

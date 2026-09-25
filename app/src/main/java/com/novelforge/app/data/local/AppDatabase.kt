@@ -14,8 +14,8 @@ import androidx.room.RoomDatabase
         LlmCallEntity::class,
         QualityRunEntity::class
     ],
-    version = 2,
-    exportSchema = false
+    version = 3,
+    exportSchema = true
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun projectDao(): ProjectDao

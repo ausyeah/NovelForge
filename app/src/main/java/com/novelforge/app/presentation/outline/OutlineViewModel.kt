@@ -65,7 +65,7 @@ class OutlineViewModel(
 
     private val validator = JsonResponseValidator()
 
-    val autoRun: StateFlow<Boolean> = generationRuntime.autoRunEnabled
+    val autoRun: StateFlow<Boolean> = generationRuntime.autoRunEnabled(projectId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
 
     /** 全自动写作时正在生成的正文任务（跨章节自动追踪最新一个） */
@@ -75,7 +75,7 @@ class OutlineViewModel(
 
     fun setAutoRun(enabled: Boolean) {
         viewModelScope.launch {
-            runCatching { generationRuntime.setAutoRun(enabled) }
+            runCatching { generationRuntime.setAutoRun(projectId, enabled) }
                 .onFailure { _error.value = it.message ?: "无法切换全自动" }
         }
     }

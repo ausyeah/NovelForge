@@ -1,6 +1,9 @@
 package com.novelforge.app.presentation.navigation
 
 import android.net.Uri
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -10,8 +13,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
@@ -54,6 +60,36 @@ import com.novelforge.app.domain.model.OutlineItem
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/**
+ * 一路剥到 Activity。
+ *
+ * Compose 里拿到的 Context 常常还包着 ContextThemeWrapper（Dialog、弹窗、
+ * 以及带主题的 Activity 都可能），直接 cast 会炸，所以循环剥。
+ */
+tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+/**
+ * 灵感助手专用的 ViewModelStoreOwner。
+ *
+ * 取不到 Activity 时（只可能在测试或异常的宿主里）退回
+ * `LocalViewModelStoreOwner.current`，也就是原来的 NavBackStackEntry ——
+ * 行为退回"退出即中断"，不会崩。这是个降级，不该是常态。
+ *
+ * 两者都拿不到就抛：宁可明确崩在开发期，也不要静悄悄退回"退出一丢"。
+ */
+@Composable
+private fun chatViewModelStoreOwner(): ViewModelStoreOwner =
+    LocalContext.current.findActivity() as? ViewModelStoreOwner
+        ?: LocalViewModelStoreOwner.current
+        ?: error(
+            "灵感助手拿不到 ViewModelStoreOwner：Activity 不是 ViewModelStoreOwner，" +
+                "且 LocalViewModelStoreOwner 也是 null"
+        )
 
 // 导出前把大纲与最新修订拼成章节列表；超长篇下这是 O(N) 大对象操作，放在 IO 线程执行
 private fun buildExportChapters(
@@ -160,14 +196,32 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                     navArgument("projectId") { type = NavType.StringType; defaultValue = "" }
                 )
             ) { entry ->
+                // ViewModel 必须挂在 **Activity** 作用域上，不能用 composable 的默认
+                // NavBackStackEntry 作用域。
+                //
+                // 默认作用域下按返回键，这个 entry 当场销毁 → onCleared →
+                // viewModelScope 取消 → 正在跑的 SSE 流被掐断。用户体感是
+                // "发完退出，回来什么都没有"，而且是真丢，不是没显示。
+                //
+                // 挂到 Activity 上之后：流在后台继续跑，增量持续落进 DataStore，
+                // 重新进入时拿到的是同一个 ViewModel，messages 已经是最新。
+                // 这就是"退出再回来还在生成"能做的最低成本做法。真正跨进程
+                // 被杀后恢复要上前台服务，那是另一件事（也没必要 ——
+                // 退出这个页面不等于退出应用）。
+                val activityOwner = chatViewModelStoreOwner()
                 val chatViewModel: ChatViewModel = viewModel(
+                    viewModelStoreOwner = activityOwner,
+                    // 按作用域分 key：Activity 作用域下所有 ViewModel 共用一个
+                    // store，不给 key 的话 A 书的聊天界面会拿到 B 书那个实例
+                    key = "chat-${entry.arguments?.getString("projectId").orEmpty()}",
                     factory = ChatViewModel.Factory(
                         settingsStore = application.appSettingsStore,
                         apiKeyStore = application.apiKeyStore,
                         client = OpenAiCompatibleClient(),
                         historyStore = application.chatHistoryStore,
                         llmCallRepository = application.llmCallRepository,
-                        attachmentStore = application.chatAttachmentStore
+                        attachmentStore = application.chatAttachmentStore,
+                        applicationScope = application.applicationScope
                     )
                 )
                 chatViewModel.bindProjectScope(entry.arguments?.getString("projectId"))

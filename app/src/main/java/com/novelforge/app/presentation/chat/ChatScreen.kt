@@ -97,6 +97,7 @@ import com.novelforge.app.ui.theme.PaperButton
 import com.novelforge.app.ui.theme.PaperShape
 import com.novelforge.app.ui.theme.PaperSurface
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -125,7 +126,15 @@ data class UiChatMessage(
      * 这条消息带的附件。存的是路径不是字节 —— 见 ChatAttachmentStore 的注释。
      * 气泡上要显示缩略图、请求时要重新读文件，两处都只拿得到路径。
      */
-    val attachments: List<StoredAttachment> = emptyList()
+    val attachments: List<StoredAttachment> = emptyList(),
+    /**
+     * 这条回复是**中途断掉**的（进程被杀 / 崩溃），不是模型正常说完的。
+     *
+     * 定期存档（checkpointIfDue）会把流到一半的内容落盘，所以从历史里
+     * 读回来时，最后一条可能是半句。界面必须说清楚，否则用户会以为
+     * 模型就只答了这么多，白等一场。
+     */
+    val interrupted: Boolean = false
 )
 
 /** 消息 id：每个新气泡一个，copy() 会原样带过去。 */
@@ -144,7 +153,14 @@ class ChatViewModel(
     private val client: OpenAiCompatibleClient,
     private val historyStore: ChatHistoryStore,
     private val llmCallRepository: com.novelforge.app.domain.repository.LlmCallRepository,
-    private val attachmentStore: com.novelforge.app.data.chat.ChatAttachmentStore
+    private val attachmentStore: com.novelforge.app.data.chat.ChatAttachmentStore,
+    /**
+     * 应用级 scope，只用在 onCleared 兜底存档上。
+     *
+     * 那一刻 viewModelScope 已经取消，存档必须换个活得久的 scope 才写得完。
+     * 默认值方便纯 JVM 单测构造（单测里不触发 onCleared 兜底）。
+     */
+    private val applicationScope: CoroutineScope = CoroutineScope(Dispatchers.IO)
 ) : ViewModel() {
     private val _messages = MutableStateFlow<List<UiChatMessage>>(emptyList())
     val messages: StateFlow<List<UiChatMessage>> = _messages.asStateFlow()
@@ -177,6 +193,7 @@ class ChatViewModel(
     private val streamReasoning = StringBuilder()
     private val streamText = StringBuilder()
     private var lastPublishAt = 0L
+    private var lastCheckpointAt = 0L
     private var streamJob: kotlinx.coroutines.Job? = null
 
     /**
@@ -223,6 +240,10 @@ class ChatViewModel(
         streamReasoning.setLength(0)
         streamText.setLength(0)
         lastPublishAt = 0L
+        // 必须一起清：换会话/换问题后如果还留着旧时间戳，新会话的头几个
+        // delta 会因为"距上次存档已久"立刻触发一次写盘，白写一遍。
+        // 反过来不清也只是多写一次，不会丢数据 —— 但这里清掉是为了语义干净。
+        lastCheckpointAt = 0L
     }
 
     /** 收到增量：先攒进 builder，再按自适应节流发布（见 streamPublishIntervalMs） */
@@ -230,6 +251,32 @@ class ChatViewModel(
         if (reasoning.isNotEmpty()) streamReasoning.append(reasoning)
         if (text.isNotEmpty()) streamText.append(text)
         publishStream(force = false)
+        checkpointIfDue()
+    }
+
+    /**
+     * 流式途中定期存档。
+     *
+     * 以前只在流结束（finally）才落一次盘。那意味着**进程被系统杀掉 /
+     * 用户划掉最近任务**时，整段生成一个字都留不下 —— 而生成一篇大纲
+     * 分析动辄一两分钟，这一下午的心血就没了。
+     *
+     * 退出页面现在靠 Activity 作用域的 ViewModel 续着跑（见导航图注释），
+     * 但那只扛得住"切页面"，扛不住"进程没了"。所以这里按 CHECKPOINT_INTERVAL_MS
+     * 额外存一次：最坏情况只丢最后几秒。
+     *
+     * 存档读的是缓冲全文（currentMessagesForPersistence），所以**冻结期间
+     * 照样存** —— 用户翻上去不想看动，但落盘必须完整。
+     */
+    private fun checkpointIfDue() {
+        if (streamText.isEmpty() && streamReasoning.isEmpty()) return
+        val now = System.currentTimeMillis()
+        if (now - lastCheckpointAt < CHECKPOINT_INTERVAL_MS) return
+        // 记时间要在这里面，不能等 persistCurrent 真正写完：
+        // 写盘是异步的，连续几个 delta 都会满足"距上次超过间隔"，
+        // 结果就是每个 token 都触发一次存档。
+        lastCheckpointAt = now
+        persistCurrent()
     }
 
     /**
@@ -343,15 +390,22 @@ class ChatViewModel(
         )
     }
 
-    private fun persistCurrent() {
+    /**
+     * 组出要落盘的会话；没有可存的内容时返回 null。
+     *
+     * 抽出来是因为 persistCurrent（viewModelScope）和 onCleared 兜底
+     * （应用级 scope）要用同一份逻辑 —— 两边算法一旦分叉，
+     * 就会变成"正常退出存的东西"和"崩溃时存的东西"不一样。
+     */
+    private fun buildConversationForPersistence(): StoredConversation? {
         val id = _activeId.value
-        if (id.isEmpty()) return
+        if (id.isEmpty()) return null
         val snapshot = currentMessagesForPersistence()
             .filter { it.text.isNotBlank() || it.reasoning.isNotBlank() }
-        if (snapshot.isEmpty()) return
+        if (snapshot.isEmpty()) return null
         val title = snapshot.firstOrNull { it.role == ChatRole.USER }?.text?.trim()?.take(24)
             ?: "新对话"
-        val conversation = StoredConversation(
+        return StoredConversation(
             id = id,
             title = title,
             updatedAt = System.currentTimeMillis(),
@@ -360,7 +414,10 @@ class ChatViewModel(
                     role = if (m.role == ChatRole.USER) "user" else "assistant",
                     text = m.text,
                     reasoning = m.reasoning,
-                    attachments = m.attachments
+                    attachments = m.attachments,
+                    // 还在流就是"没说完"。这份快照既用于正常存档也用于
+                    // onCleared 兜底，两种情况下"正在流"都等于内容不完整。
+                    interrupted = m.interrupted || (_busy.value && m.streaming)
                 )
             },
             // 落进当前作用域的桶：没有书上下文就是全局「灵感」桶
@@ -369,6 +426,10 @@ class ChatViewModel(
             // 不带这个字段的话，用户刚关掉的「思考」会被下一次发送悄悄改回开着
             thinkingEnabled = _thinkingEnabled.value
         )
+    }
+
+    private fun persistCurrent() {
+        val conversation = buildConversationForPersistence() ?: return
         viewModelScope.launch { runCatching { historyStore.save(conversation) } }
     }
 
@@ -659,6 +720,22 @@ class ChatViewModel(
     }
 
     override fun onCleared() {
+        // 先落盘再收尾。onCleared 是在 viewModelScope **已经取消之后**才回调的，
+        // 所以这里再往 viewModelScope 里 launch 存档是必然跑不到的 ——
+        // 协程一创建就被取消，一次都执行不了。
+        //
+        // 用应用级 scope 兜底：它比 ViewModel 活得久，写得完。
+        // 这条只在真正要消失时兜底（正常退出页面现在不会走到这里，
+        // 因为 ViewModel 挂在 Activity 上）；流式途中的定期存档见 checkpointIfDue。
+        val conversation = buildConversationForPersistence()
+        if (conversation != null) {
+            // 不阻塞主线程：DataStore 写盘在 IO 上跑。
+            // 不用 viewModelScope：它此刻已经取消，launch 进去必然跑不到。
+            // 这里也不需要取消 —— 写完就没了，跑不掉反而是想要的。
+            applicationScope.launch {
+                runCatching { historyStore.save(conversation) }
+            }
+        }
         // ViewModel 消失时把还没发出去的附件清掉：它们永远不会进任何消息
         clearPendingAttachments()
         super.onCleared()
@@ -670,7 +747,8 @@ class ChatViewModel(
         private val client: OpenAiCompatibleClient,
         private val historyStore: ChatHistoryStore,
         private val llmCallRepository: com.novelforge.app.domain.repository.LlmCallRepository,
-        private val attachmentStore: com.novelforge.app.data.chat.ChatAttachmentStore
+        private val attachmentStore: com.novelforge.app.data.chat.ChatAttachmentStore,
+        private val applicationScope: CoroutineScope
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T = ChatViewModel(
@@ -679,7 +757,8 @@ class ChatViewModel(
             client,
             historyStore,
             llmCallRepository,
-            attachmentStore
+            attachmentStore,
+            applicationScope
         ) as T
     }
 }
@@ -713,11 +792,23 @@ internal fun streamPublishIntervalMs(chars: Int): Long = when {
     else -> (50L + chars / 25L).coerceAtMost(250L)
 }
 
+/**
+ * 流式途中每隔多久往磁盘存一次。
+ *
+ * 只为了扛住"进程被系统杀掉"：退出页面已经靠 Activity 作用域的 ViewModel
+ * 续上了（见导航图注释），进程没了就只能靠定期落盘。
+ *
+ * 3 秒是个折中：一次存档要把整段会话序列化成 JSON 写进 DataStore，
+ * 太频繁会拖慢流；太长则崩溃时丢得多。一两分钟的生成最多丢最后 3 秒。
+ */
+private const val CHECKPOINT_INTERVAL_MS = 3_000L
+
 private fun StoredChatMessage.toUiMessage(): UiChatMessage = UiChatMessage(
     role = if (role == "user") ChatRole.USER else ChatRole.ASSISTANT,
     text = text,
     reasoning = reasoning,
-    attachments = attachments
+    attachments = attachments,
+    interrupted = interrupted
 )
 
 private val UserBubbleShape = RoundedCornerShape(20.dp, 6.dp, 20.dp, 20.dp)
@@ -1287,6 +1378,18 @@ fun ChatScreen(
                                                     "…",
                                                     style = MaterialTheme.typography.bodyMedium,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+
+                                            // 中断标记。定期存档会把流到一半的内容落盘，
+                                            // 所以从历史读回来的最后一条可能是半句 ——
+                                            // 不说清楚的话用户会以为模型就只答了这么多。
+                                            if (message.interrupted) {
+                                                Text(
+                                                    "生成被中断，以上是已经收到的部分",
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.error,
+                                                    modifier = Modifier.padding(bottom = 6.dp)
                                                 )
                                             }
 

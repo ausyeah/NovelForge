@@ -38,8 +38,8 @@ android {
         applicationId = "com.novelforge.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 146
-        versionName = "0.2.0-beta47"
+        versionCode = 147
+        versionName = "0.2.0-beta48"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

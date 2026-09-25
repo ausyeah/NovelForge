@@ -36,12 +36,24 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 class NovelForgeApplication : Application(), GenerationWorkerDependenciesProvider {
-    private val appScope = CoroutineScope(
+    /**
+     * 应用级 scope：比任何 ViewModel 都活得久。
+     *
+     * 用来做"ViewModel 都要没了，但这件事必须做完"的事 ——
+     * 比如灵感助手退出时把正在生成的回复落盘（见 ChatViewModel.onCleared）。
+     * 那种时候 viewModelScope 已经取消，往里 launch 一次都跑不到。
+     *
+     * 公开是因为 ChatViewModel.onCleared 需要它；别拿它当通用后台队列用，
+     * 它没有取消入口，发起方死了它还接着跑。
+     */
+    val applicationScope = CoroutineScope(
         SupervisorJob() + kotlinx.coroutines.Dispatchers.Default +
             CoroutineExceptionHandler { _, _ ->
                 // 启动清扫跑在后台；漏网异常不能把整个进程打掉
             }
     )
+
+    private val appScope = applicationScope
 
     val database: AppDatabase by lazy { openResilientDatabase() }
 

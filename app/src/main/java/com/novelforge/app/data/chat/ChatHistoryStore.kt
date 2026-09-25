@@ -32,7 +32,15 @@ data class StoredChatMessage(
      * 撑到 100 MB —— 而它是在主线程反序列化的，直接 ANR。
      * 可空 + 默认值：老 JSON 没有这个字段照样解得出来。
      */
-    val attachments: List<StoredAttachment> = emptyList()
+    val attachments: List<StoredAttachment> = emptyList(),
+    /**
+     * 这条回复是中途断掉的（进程被系统杀掉），不是模型说完的。
+     *
+     * 定期存档会把流到一半的内容落盘，所以最后一条经常是半句。
+     * 不标出来的话，用户从历史里翻出来会以为模型就只答了这么多。
+     * 可空 + 默认 false：老 JSON 没这个字段解得出来，按"正常"处理。
+     */
+    val interrupted: Boolean = false
 )
 
 @Serializable

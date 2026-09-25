@@ -137,7 +137,8 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                         outlineRepository = application.outlineRepository,
                         chapterRepository = application.chapterRepository,
                         generationArtifactRepository = application.generationArtifactRepository,
-                        readingPositionStore = application.readingPositionStore
+                        readingPositionStore = application.readingPositionStore,
+                        coverStore = application.bookCoverStore
                     )
                 )
                 LibraryScreen(

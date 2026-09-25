@@ -5,7 +5,10 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -15,6 +18,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -27,6 +31,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -36,13 +41,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -52,6 +62,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.novelforge.app.data.cover.BookCover
 import com.novelforge.app.domain.model.Project
 import com.novelforge.app.domain.model.label
 import com.novelforge.app.domain.repository.ChapterRepository
@@ -91,7 +102,8 @@ class LibraryViewModel(
     private val outlineRepository: OutlineRepository,
     private val chapterRepository: ChapterRepository,
     private val generationArtifactRepository: com.novelforge.app.domain.repository.GenerationArtifactRepository,
-    private val readingPositionStore: com.novelforge.app.data.settings.ReadingPositionStore
+    private val readingPositionStore: com.novelforge.app.data.settings.ReadingPositionStore,
+    private val coverStore: com.novelforge.app.data.cover.BookCoverStore
 ) : ViewModel() {
     val projects: StateFlow<List<Project>> = projectRepository.observeProjects()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -227,16 +239,65 @@ class LibraryViewModel(
     fun delete(projectId: String) {
         viewModelScope.launch {
             projectRepository.deleteProject(projectId)
+            // 封面文件和数据条目都得跟着走：项目 id 会复用，
+            // 留着的话新书一建出来就顶着上一本书的封面
+            runCatching { coverStore.clear(projectId) }
             _novel.value = _novel.value?.takeIf { it.projectId != projectId }
         }
     }
+
+    // —— 封面 ————————————————————————————————————————
+
+    /**
+     * projectId -> 封面。存的是「预设第几号」还是「有没有自定义图」这种小整数/布尔，
+     * 不是 Bitmap —— 书架网格里的图是按需解码的缩略图，不进这里，也绝不能进 Bundle。
+     */
+    private val _covers = MutableStateFlow<Map<String, BookCover>>(emptyMap())
+    val covers: StateFlow<Map<String, BookCover>> = _covers.asStateFlow()
+
+    fun refreshCovers(projectIds: Collection<String>) {
+        viewModelScope.launch {
+            val loaded = projectIds.associateWith { id ->
+                runCatching { coverStore.observe(id).first() }.getOrDefault(BookCover.Default)
+            }
+            _covers.update { current -> current + loaded }
+        }
+    }
+
+    fun setPresetCover(projectId: String, index: Int) {
+        viewModelScope.launch {
+            runCatching { coverStore.setPreset(projectId, index) }
+                .onSuccess { _covers.update { it + (projectId to BookCover.Preset(index)) } }
+        }
+    }
+
+    fun setImageCover(projectId: String, uri: android.net.Uri, onResult: (Boolean) -> Unit) {
+        viewModelScope.launch {
+            val ok = runCatching { coverStore.setImageFrom(projectId, uri) }
+                .getOrDefault(false)
+            if (ok) {
+                _covers.update { it + (projectId to BookCover.Image(coverStore.fileFor(projectId).name)) }
+            }
+            onResult(ok)
+        }
+    }
+
+    fun resetCover(projectId: String) {
+        viewModelScope.launch {
+            runCatching { coverStore.clear(projectId) }
+            _covers.update { it + (projectId to BookCover.Default) }
+        }
+    }
+
+    suspend fun coverThumbnail(projectId: String) = coverStore.thumbnail(projectId)
 
     class Factory(
         private val projectRepository: ProjectRepository,
         private val outlineRepository: OutlineRepository,
         private val chapterRepository: ChapterRepository,
         private val generationArtifactRepository: com.novelforge.app.domain.repository.GenerationArtifactRepository,
-        private val readingPositionStore: com.novelforge.app.data.settings.ReadingPositionStore
+        private val readingPositionStore: com.novelforge.app.data.settings.ReadingPositionStore,
+        private val coverStore: com.novelforge.app.data.cover.BookCoverStore
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T = LibraryViewModel(
@@ -244,7 +305,8 @@ class LibraryViewModel(
             outlineRepository,
             chapterRepository,
             generationArtifactRepository,
-            readingPositionStore
+            readingPositionStore,
+            coverStore
         ) as T
     }
 }
@@ -331,6 +393,80 @@ private val COVER_COLORS = listOf(
 
 private fun abs(value: Int): Int = if (value == Int.MIN_VALUE) 0 else if (value < 0) -value else value
 
+/**
+ * 书架上的一本书。
+ *
+ * 自定义封面用 produceState + IO 线程解码缩略图，**不在组合期读文件** ——
+ * 书架一次能列几十本，每格同步解一张图会直接卡住首屏。
+ * 读不出来就落回颜色，绝不留一块空白。
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun BookCoverTile(
+    project: Project,
+    cover: BookCover,
+    fallbackColor: Color,
+    onThumbnail: suspend () -> android.graphics.Bitmap?,
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    val bitmap by produceState<android.graphics.Bitmap?>(initialValue = null, project.id, cover) {
+        if (cover is BookCover.Image) {
+            value = runCatching { onThumbnail() }.getOrNull()
+        }
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(0.72f)
+            .clip(RoundedCornerShape(10.dp))
+            .background(fallbackColor)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
+    ) {
+        val image = bitmap
+        if (image != null) {
+            Image(
+                bitmap = image.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+            // 自定义图上也要压一层暗色，不然浅色封面上的白字读不出来
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            0f to Color.Black.copy(alpha = 0.45f),
+                            0.5f to Color.Transparent,
+                            1f to Color.Black.copy(alpha = 0.55f)
+                        )
+                    )
+            )
+        }
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(12.dp),
+            verticalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                project.title,
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.titleMedium
+            )
+            Text(
+                project.status.label(),
+                color = Color.White.copy(alpha = 0.85f),
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+    }
+}
+
 /** 顶部「继续写」挑哪本：最近更新的那本。空表返回 null，正好对应「没有书就不显示这张卡」。 */
 internal fun pickContinueWritingProject(projects: List<Project>): Project? =
     projects.maxByOrNull { it.updatedAt }
@@ -372,6 +508,25 @@ fun LibraryScreen(
     var deleteTarget by remember { mutableStateOf<Project?>(null) }
     var themeIndex by rememberSaveable { mutableIntStateOf(0) }
     var fontSize by rememberSaveable { mutableIntStateOf(18) }
+    // 换封面
+    var coverTarget by remember { mutableStateOf<Project?>(null) }
+    var coverBusy by remember { mutableStateOf(false) }
+    var coverMessage by remember { mutableStateOf<String?>(null) }
+    val covers by viewModel.covers.collectAsStateWithLifecycle()
+    val coverPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        val target = coverTarget ?: return@rememberLauncherForActivityResult
+        if (uri == null) return@rememberLauncherForActivityResult
+        coverBusy = true
+        viewModel.setImageCover(target.id, uri) { ok ->
+            coverBusy = false
+            coverMessage = if (ok) "封面换好了" else "这张图片没读出来，换一张试试"
+        }
+    }
+    LaunchedEffect(projects.map { it.id }) {
+        viewModel.refreshCovers(projects.map { it.id })
+    }
     val readerThemes = listOf(followReaderTheme()) + READER_THEMES
     // 顶部「继续读」按下的那本书：书要现打开，等目录到齐后自己落到上次那一章
     var pendingReadId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -666,36 +821,19 @@ fun LibraryScreen(
                         }
                     }
                     items(projects, key = { it.id }) { project ->
-                        val cover = COVER_COLORS[abs(project.id.hashCode()) % COVER_COLORS.size]
-                        Box(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .aspectRatio(0.72f)
-                                .background(cover, RoundedCornerShape(10.dp))
-                                .combinedClickable(
-                                    // 单击进写作界面：这是个写书 App，写作是主动词。
-                                    // 原来单击进的是本书目录（阅读面），于是从书架进得去书、
-                                    // 出不来书，也永远到不了写作界面。
-                                    // 阅读降级成长按菜单里的第二项，续读还有顶部那张卡兜着。
-                                    onClick = { onContinueWriting(project) },
-                                    onLongClick = { actionTarget = project }
-                                )
-                                .padding(12.dp)
-                        ) {
-                            Text(
-                                project.title,
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 3,
-                                overflow = TextOverflow.Ellipsis
-                            )
-                            Text(
-                                project.status.label(),
-                                color = Color.White.copy(alpha = 0.8f),
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.align(Alignment.BottomStart)
-                            )
-                        }
+                        val cover = covers[project.id] ?: BookCover.Default
+                        val fallback = COVER_COLORS[
+                            (cover as? BookCover.Preset)?.index
+                                ?: abs(project.id.hashCode()) % COVER_COLORS.size
+                        ]
+                        BookCoverTile(
+                            project = project,
+                            cover = cover,
+                            fallbackColor = fallback,
+                            onThumbnail = { viewModel.coverThumbnail(project.id) },
+                            onClick = { onContinueWriting(project) },
+                            onLongClick = { actionTarget = project }
+                        )
                     }
                 }
                 // 旧「全部项目」页的入口也搬过来：书架现在是唯一的作品列表，
@@ -733,14 +871,17 @@ fun LibraryScreen(
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text("阅读") }
-                    Button(
-                        onClick = {
-                            actionTarget = null
-                            backupProjectId = target.id
-                            exportLauncher.launch(app.backupStore.suggestedFileName(target.title))
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) { Text("导出整书备份（大纲 + 正文）") }
+                    TextButton(onClick = {
+                        backupProjectId = target.id
+                        exportLauncher.launch(app.backupStore.suggestedFileName(target.title))
+                    }) {
+                        Text("导出整书备份（大纲 + 正文）")
+                    }
+                    TextButton(onClick = {
+                        actionTarget = null
+                        coverTarget = target
+                        coverMessage = null
+                    }) { Text("换封面") }
                     TextButton(onClick = {
                         renameTarget = target
                         renameTitle = target.title
@@ -755,6 +896,80 @@ fun LibraryScreen(
             confirmButton = {},
             dismissButton = {
                 TextButton(onClick = { actionTarget = null }) { Text("取消") }
+            }
+        )
+    }
+
+    coverTarget?.let { target ->
+        val current = covers[target.id] ?: BookCover.Default
+        AlertDialog(
+            onDismissRequest = { if (!coverBusy) coverTarget = null },
+            title = { Text("《${target.title}》封面") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        "挑一个底色，或者用自己的图。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    // 底色：和书架上原来的观感同一组色
+                    for ((rowIndex, row) in COVER_COLORS.chunked(3).withIndex()) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            row.forEachIndexed { columnIndex, color ->
+                                val index = rowIndex * 3 + columnIndex
+                                val selected = current is BookCover.Preset && current.index == index
+                                Box(
+                                    modifier = Modifier
+                                        .size(52.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(color)
+                                        .then(
+                                            if (selected) {
+                                                Modifier.border(
+                                                    3.dp,
+                                                    MaterialTheme.colorScheme.primary,
+                                                    RoundedCornerShape(8.dp)
+                                                )
+                                            } else {
+                                                Modifier
+                                            }
+                                        )
+                                        .clickable(enabled = !coverBusy) {
+                                            viewModel.setPresetCover(target.id, index)
+                                        }
+                                )
+                            }
+                            repeat(3 - row.size) { Box(Modifier.size(52.dp)) }
+                        }
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            coverPicker.launch(
+                                androidx.activity.result.PickVisualMediaRequest(
+                                    ActivityResultContracts.PickVisualMedia.ImageOnly
+                                )
+                            )
+                        },
+                        enabled = !coverBusy,
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text(if (coverBusy) "处理中…" else "从相册选一张") }
+                    if (current != BookCover.Default) {
+                        TextButton(
+                            onClick = { viewModel.resetCover(target.id) },
+                            enabled = !coverBusy
+                        ) { Text("恢复默认") }
+                    }
+                    coverMessage?.let {
+                        Text(
+                            it,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { coverTarget = null }) { Text("完成") }
             }
         )
     }

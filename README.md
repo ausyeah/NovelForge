@@ -118,6 +118,8 @@ NovelForge 就是冲着这两件事做的。
 
 封面墙，点进去就是目录。一键**续读**回上次读到的地方。阅读支持四套主题（跟随 / 白纸 / 护眼 / 夜间）、字号 12–30 可调、上一章下一章跳转。章节可以重命名、删除。
 
+**长按封面**可以换封面：挑一个底色，或者从相册选一张自己的图（自动居中裁成竖版，不会被压扁）。删书时会一并清掉封面文件。
+
 ### 用量账本
 
 每一次调用的 Token 都记账：输入（净输入 + 缓存命中分开算）、输出（含思考 token）、成功率、按模型排行、按项目分布。只统计 Token，不换算费用——账单以你的服务商为准。明细可按今天、近 7 天、近 30 天筛，翻页看每一次调用。
@@ -154,7 +156,7 @@ TXT 另外导出，保存在「下载/NovelForge/」，可以离线看，也可�
 
 ## 下载
 
-**[Releases 页面](https://github.com/ausyeah/NovelForge/releases/tag/v0.2.0-beta43)** 提供可直接安装的 release 构建 APK，可安装到 Android 8 及以上。
+**[Releases 页面](https://github.com/ausyeah/NovelForge/releases/tag/v0.2.0-beta44)** 提供可直接安装的 release 构建 APK，可安装到 Android 8 及以上。
 
 装好后到「模型设置」里填自己的 OpenAI-compatible 接口（Base URL、模型名、API Key）。接口可以存多套预设，同一服务商的不同接口会自动标成「名称（2）」，点一下就拉回表单改。
 

@@ -2,7 +2,6 @@ package com.novelforge.app.presentation.chat.richtext
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -22,22 +21,20 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.Placeholder
 import androidx.compose.ui.text.PlaceholderVerticalAlign
 import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
@@ -55,9 +52,14 @@ import androidx.compose.ui.unit.sp
  * AnnotatedString -> 这里只负责把块铺开。颜色一律取
  * [MaterialTheme.colorScheme]，浅色深色都不会写出对比度问题。
  *
- * 两条必须守住的底线：
+ * 三条必须守住的底线：
  * - 表格和代码块横向可滚。10 列的表塞进 300dp 的气泡，不滚就溢出。
  * - 任何输入都不能渲染成空白。解析器全部降级到「显示原文」。
+ * - **本文件不得再碰指针事件**（没有 pointerInput / detectTapGestures /
+ *   clickable）。气泡整棵子树都活在调用方的 SelectionContainer 里，任何
+ *   在这里 consume 按下事件的识别器都会把长按选词抢走。链接点击因此完全
+ *   交给 Compose 自己的 LinkAnnotation 机制（见 MarkdownInline，那是链接
+ *   唯一的给法），拦截打开动作靠 LocalUriHandler 覆盖，不经过指针系统。
  */
 @Composable
 fun ChatRichText(
@@ -72,12 +74,29 @@ fun ChatRichText(
     val blocks = remember(text) { parseMarkdown(text) }
     if (blocks.isEmpty()) return
 
-    Column(
-        modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        blocks.forEach { block ->
-            MarkdownBlockView(block, color, onLinkClick)
+    // Text 命中 LinkAnnotation.Url 后会走 LocalUriHandler.openUri（见
+    // TextLinkScope.handleLink）。在这里覆盖它，就能在完全不注册指针
+    // 识别器的前提下接管「打开链接」——长按选词、拖拽选区都归
+    // SelectionContainer 自己，不会被抢。
+    val defaultUriHandler = LocalUriHandler.current
+    val latestOnLinkClick = rememberUpdatedState(onLinkClick)
+    val uriHandler = remember(defaultUriHandler) {
+        object : UriHandler {
+            override fun openUri(uri: String) {
+                val callback = latestOnLinkClick.value
+                if (callback != null) callback(uri) else defaultUriHandler.openUri(uri)
+            }
+        }
+    }
+
+    CompositionLocalProvider(LocalUriHandler provides uriHandler) {
+        Column(
+            modifier = modifier,
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            blocks.forEach { block ->
+                MarkdownBlockView(block, color)
+            }
         }
     }
 }
@@ -85,8 +104,7 @@ fun ChatRichText(
 @Composable
 private fun MarkdownBlockView(
     block: MarkdownBlock,
-    color: Color,
-    onLinkClick: ((String) -> Unit)?
+    color: Color
 ) {
     when (block) {
         is MarkdownBlock.Heading -> {
@@ -95,17 +113,17 @@ private fun MarkdownBlockView(
                 2 -> MaterialTheme.typography.titleSmall
                 else -> MaterialTheme.typography.bodyMedium
             }
-            val rich = rememberInlineRich(block.text, nativeLinks = onLinkClick == null)
-            RichInline(rich, style.copy(fontWeight = FontWeight.Bold), color, onLinkClick)
+            val rich = rememberInlineRich(block.text)
+            RichInline(rich, style.copy(fontWeight = FontWeight.Bold), color)
         }
 
-        is MarkdownBlock.Paragraph -> ParagraphView(block.text, color, onLinkClick)
+        is MarkdownBlock.Paragraph -> ParagraphView(block.text, color)
 
         is MarkdownBlock.CodeBlock -> CodeBlockView(block, color)
 
-        is MarkdownBlock.TableBlock -> TableView(block, color, onLinkClick)
+        is MarkdownBlock.TableBlock -> TableView(block, color)
 
-        is MarkdownBlock.ListBlock -> ListView(block, color, onLinkClick)
+        is MarkdownBlock.ListBlock -> ListView(block, color)
 
         is MarkdownBlock.Blockquote -> {
             // 左侧一条竖线 + 内容缩进。嵌套引用会自然画成多条竖线
@@ -124,7 +142,7 @@ private fun MarkdownBlockView(
                     modifier = Modifier.padding(start = 10.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    block.blocks.forEach { MarkdownBlockView(it, color, onLinkClick) }
+                    block.blocks.forEach { MarkdownBlockView(it, color) }
                 }
             }
         }
@@ -141,22 +159,14 @@ private fun MarkdownBlockView(
 // ---------------------------------------------------------------- 段落
 
 @Composable
-private fun ParagraphView(source: String, color: Color, onLinkClick: ((String) -> Unit)?) {
+private fun ParagraphView(source: String, color: Color) {
     val baseStyle = MaterialTheme.typography.bodyMedium
     val mathStyle = mathStyleFor(baseStyle, color)
-    // 接了 onLinkClick 就只挂 stringAnnotation（点击自己接管）；
-    // 否则挂 LinkAnnotation，让系统按普通链接处理（TalkBack 念得出「链接」）
-    val nativeLinks = onLinkClick == null
     // display 数学（$$...$$）要自己占一行居中，所以先把它切出来
     val segments = remember(source) { splitDisplayMath(source) }
 
     if (segments.size == 1 && segments.first() is MathSegment.Text) {
-        RichInline(
-            rememberInlineRich(source, mathStyle, nativeLinks),
-            baseStyle,
-            color,
-            onLinkClick
-        )
+        RichInline(rememberInlineRich(source, mathStyle), baseStyle, color)
         return
     }
 
@@ -165,10 +175,9 @@ private fun ParagraphView(source: String, color: Color, onLinkClick: ((String) -
             when (segment) {
                 is MathSegment.Text -> if (segment.text.isNotEmpty()) {
                     RichInline(
-                        rememberInlineRich(segment.text, mathStyle, nativeLinks),
+                        rememberInlineRich(segment.text, mathStyle),
                         baseStyle,
-                        color,
-                        onLinkClick
+                        color
                     )
                 }
 
@@ -210,8 +219,7 @@ private class InlineRich(
 @Composable
 private fun rememberInlineRich(
     source: String,
-    mathStyle: MathStyle? = null,
-    nativeLinks: Boolean = false
+    mathStyle: MathStyle? = null
 ): InlineRich {
     val scheme = MaterialTheme.colorScheme
     val options = remember(scheme) {
@@ -220,24 +228,26 @@ private fun rememberInlineRich(
             link = SpanStyle(color = scheme.primary)
         )
     }
-    return remember(source, options, mathStyle, nativeLinks) {
+    return remember(source, options, mathStyle) {
         val parts = LinkedHashMap<String, MathPart>()
         val style = mathStyle ?: MathStyle()
         val sink = MathInlineSink { builder, mathSource ->
             appendMathExpression(builder, mathSource, style, parts)
         }
-        val text = buildMarkdownInline(source, sink, options, useLinkAnnotations = nativeLinks)
+        // 链接命中和打开都交给 Compose 自己（它挂在 Text 的子节点上，
+        // 不在 Text 的手势路径上），而自定义的 pointerInput 一旦装上
+        // 就会和 SelectionContainer 抢长按。
+        val text = buildMarkdownInline(source, sink, options)
         InlineRich(text, parts)
     }
 }
 
-/** 真正的 Text 出口。链接点击、公式占位都在这一层收口。 */
+/** 真正的 Text 出口。公式占位在这一层收口；链接点击不经过这里。 */
 @Composable
 private fun RichInline(
     rich: InlineRich,
     style: TextStyle,
-    color: Color,
-    onLinkClick: ((String) -> Unit)?
+    color: Color
 ) {
     if (rich.text.text.isEmpty()) {
         // 空内容不留一个 0 高度的 Text：调用方该自己画占位
@@ -247,8 +257,7 @@ private fun RichInline(
         text = rich.text,
         parts = rich.parts,
         style = style,
-        color = color,
-        onLinkClick = onLinkClick
+        color = color
     )
 }
 
@@ -258,46 +267,28 @@ private fun MathInline(expr: MathExpression, color: Color) {
         fontSize = 16.sp,
         fontStyle = FontStyle.Normal
     )
-    InlineText(expr.text, expr.parts, style, color, null)
+    InlineText(expr.text, expr.parts, style, color)
 }
 
+/**
+ * 单个 Text 出口。
+ *
+ * 刻意保持「零指针输入」：没有 pointerInput、没有 detectTapGestures、
+ * 没有 clickable，也没有 onTextLayout —— 全都是为了做链接点击命中测试
+ * 才需要的东西，而正是它抢走了 SelectionContainer 的长按。链接的打开
+ * 由 [ChatRichText] 挂在树上的 [LocalUriHandler] 拦截。
+ */
 @Composable
 private fun InlineText(
     text: AnnotatedString,
     parts: Map<String, MathPart>,
     style: TextStyle,
-    color: Color,
-    onLinkClick: ((String) -> Unit)?
+    color: Color
 ) {
-    val inline = mathInlineContent(parts, color, style.fontSize)
-    var layout by remember { mutableStateOf<TextLayoutResult?>(null) }
-    val handler by rememberUpdatedState(onLinkClick)
-
-    // 只在真的要接管点击时才装手势。默认 handler == null 时完全不碰指针
-    // 事件，SelectionContainer 的长按选词一点不受影响
-    val clickModifier = if (onLinkClick == null) {
-        Modifier
-    } else {
-        Modifier.pointerInput(Unit) {
-            detectTapGestures { position ->
-                val result = layout ?: return@detectTapGestures
-                val offset = result.getOffsetForPosition(position)
-                // 用自己 build 出来的 AnnotatedString 查标注：
-                // TextLayoutResult 不把原文暴露出来
-                val hit = text
-                    .getStringAnnotations(URL_TAG, offset, offset)
-                    .firstOrNull()
-                if (hit != null) handler?.invoke(hit.item)
-            }
-        }
-    }
-
     Text(
         text = text,
-        modifier = clickModifier,
         color = color,
-        inlineContent = inline,
-        onTextLayout = { layout = it },
+        inlineContent = mathInlineContent(parts, color, style.fontSize),
         style = style
     )
 }
@@ -398,8 +389,7 @@ private fun MathParts(expr: MathExpression, color: Color, fontSize: TextUnit) {
             fontSize = fontSize,
             fontStyle = FontStyle.Normal
         ),
-        color = color,
-        onLinkClick = null
+        color = color
     )
 }
 
@@ -450,8 +440,7 @@ private fun CodeBlockView(block: MarkdownBlock.CodeBlock, color: Color) {
 @Composable
 private fun TableView(
     block: MarkdownBlock.TableBlock,
-    color: Color,
-    onLinkClick: ((String) -> Unit)?
+    color: Color
 ) {
     val scheme = MaterialTheme.colorScheme
     val scroll = rememberScrollState()
@@ -467,7 +456,6 @@ private fun TableView(
             cells = block.header,
             aligns = block.aligns,
             color = color,
-            onLinkClick = onLinkClick,
             bold = true,
             background = scheme.surfaceVariant.copy(alpha = 0.6f)
         )
@@ -480,7 +468,7 @@ private fun TableView(
                         .background(scheme.outlineVariant)
                 )
             }
-            TableRow(row, block.aligns, color, onLinkClick, bold = false, background = Color.Transparent)
+            TableRow(row, block.aligns, color, bold = false, background = Color.Transparent)
         }
     }
 }
@@ -490,7 +478,6 @@ private fun TableRow(
     cells: List<String>,
     aligns: List<ColumnAlign>,
     color: Color,
-    onLinkClick: ((String) -> Unit)?,
     bold: Boolean,
     background: Color
 ) {
@@ -508,7 +495,6 @@ private fun TableRow(
                 source = cell,
                 align = aligns.getOrNull(index) ?: ColumnAlign.DEFAULT,
                 color = color,
-                onLinkClick = onLinkClick,
                 bold = bold,
                 background = background
             )
@@ -521,7 +507,6 @@ private fun TableCell(
     source: String,
     align: ColumnAlign,
     color: Color,
-    onLinkClick: ((String) -> Unit)?,
     bold: Boolean,
     background: Color
 ) {
@@ -529,7 +514,7 @@ private fun TableCell(
         fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
         textAlign = alignToTextAlign(align)
     )
-    val rich = rememberInlineRich(source, nativeLinks = onLinkClick == null)
+    val rich = rememberInlineRich(source)
     Box(
         modifier = Modifier
             .widthIn(min = 72.dp)
@@ -540,7 +525,7 @@ private fun TableCell(
             // 空单元也要有高度，否则行会塌
             Box(Modifier.height(18.dp))
         } else {
-            RichInline(rich, style, color, onLinkClick)
+            RichInline(rich, style, color)
         }
     }
 }
@@ -556,8 +541,7 @@ private fun alignToTextAlign(align: ColumnAlign): TextAlign = when (align) {
 @Composable
 private fun ListView(
     block: MarkdownBlock.ListBlock,
-    color: Color,
-    onLinkClick: ((String) -> Unit)?
+    color: Color
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         block.items.forEachIndexed { index, item ->
@@ -583,7 +567,7 @@ private fun ListView(
                     if (item.blocks.isEmpty()) {
                         Box(Modifier.height(20.dp))
                     } else {
-                        item.blocks.forEach { MarkdownBlockView(it, color, onLinkClick) }
+                        item.blocks.forEach { MarkdownBlockView(it, color) }
                     }
                 }
             }

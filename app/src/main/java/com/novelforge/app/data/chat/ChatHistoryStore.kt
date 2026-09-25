@@ -47,7 +47,16 @@ data class StoredConversation(
      * 于是 A 书的人物讨论会被原样塞进 B 书的请求，模型把两本书的人物混成一套。
      * 可空 + 默认值：老 JSON 没有这个字段照样能解出来，落到全局桶，不丢数据。
      */
-    val projectId: String? = null
+    val projectId: String? = null,
+    /**
+     * 这段对话要不要「思考过程」。
+     *
+     * 以前是硬编码的：灵感助手永远带思考。开着能看见模型怎么想的，
+     * 但明显更慢、token 烧得更多，而且有的模型会先thinking很久才吐第一个字。
+     * 砍脑子的场景（快速追问设定、让它直接给方案）就很难受。
+     * 可空 + 默认 true：老会话没这个字段就按以前的「一直开」处理。
+     */
+    val thinkingEnabled: Boolean = true
 )
 
 /** 全局「灵感」桶：拿不到书上下文时的作用域，老会话也归这里。 */
@@ -106,6 +115,25 @@ class ChatHistoryStore(private val context: Context) {
         context.chatHistoryDataStore.edit { preferences ->
             val list = decode(preferences[key]).filterNot { it.id == conversation.id }
             preferences[key] = json.encodeToString(SERIALIZER, trim(list + conversation))
+        }
+    }
+
+    /**
+     * 只改一段会话的「思考」开关，不碰消息。
+     *
+     * 不能让调用方走 save(整段)：那样要把整份会话读出来、改一个字段、再写回去，
+     * 而这份会话可能有好几 MB 文本。
+     */
+    suspend fun updateThinking(id: String, projectId: String?, enabled: Boolean) {
+        val key = scopeKey(projectId)
+        context.chatHistoryDataStore.edit { preferences ->
+            val list = decode(preferences[key])
+            val index = list.indexOfFirst { it.id == id }
+            if (index < 0) return@edit
+            preferences[key] = json.encodeToString(
+                SERIALIZER,
+                list.toMutableList().also { it[index] = it[index].copy(thinkingEnabled = enabled) }
+            )
         }
     }
 

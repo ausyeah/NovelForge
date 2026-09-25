@@ -3,6 +3,7 @@ package com.novelforge.app.data.chat
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -116,5 +117,75 @@ class ChatHistoryStoreTest {
         assertEquals(listOf("b", "g"), afterDeleteA.map { it.id })
         assertTrue(selectChatScope(afterDeleteA, "book-a").isEmpty())
         assertEquals(listOf("b"), selectChatScope(afterDeleteA, "book-b").map { it.id })
+    }
+
+    /**
+     * 「思考」开关是按会话存的，缺省必须是 **true**。
+     *
+     * 以前灵感助手是硬编码带思考的。如果缺省写成 false，老会话一读出来
+     * 就变成"关了思考"，用户看到的是自己没动过的设置凭空被改了。
+     */
+    @Test
+    fun legacyJsonWithoutThinkingFlag_decodesAsThinkingOn() {
+        val decoded = json.decodeFromString(serializer, legacyPayload)
+
+        assertTrue(decoded.single().thinkingEnabled)
+    }
+
+    @Test
+    fun thinkingFlagSurvivesRoundTrip() {
+        val off = conversation("a", "book-a").copy(thinkingEnabled = false)
+        val on = conversation("g", null)
+
+        val decoded = json.decodeFromString(
+            serializer,
+            json.encodeToString(serializer, listOf(off, on))
+        )
+
+        assertFalse(decoded.first { it.id == "a" }.thinkingEnabled)
+        assertTrue(decoded.first { it.id == "g" }.thinkingEnabled)
+    }
+
+    /**
+     * 守住 updateThinking 的语义：只改一个字段。
+     *
+     * 调用方拿不到整份会话去改（可能有几 MB 文本），所以这个测试替它守
+     * "别顺手把消息、项目归属、标题一起改了"。
+     */
+    @Test
+    fun flippingThinking_leavesEverythingElseUntouched() {
+        val original = StoredConversation(
+            id = "a",
+            title = "讨论主角动机",
+            updatedAt = 1234L,
+            messages = listOf(
+                StoredChatMessage(role = "user", text = "周岚为什么隐瞒身份"),
+                StoredChatMessage(role = "assistant", text = "因为她记错了自己的档案", reasoning = "先看时间线")
+            ),
+            projectId = "book-a",
+            thinkingEnabled = true
+        )
+
+        val updated = original.copy(thinkingEnabled = false)
+
+        assertFalse(updated.thinkingEnabled)
+        assertEquals(original.id, updated.id)
+        assertEquals(original.title, updated.title)
+        assertEquals(original.updatedAt, updated.updatedAt)
+        assertEquals(original.projectId, updated.projectId)
+        assertEquals(original.messages, updated.messages)
+    }
+
+    /** 换一段对话就该用那段自己的设置：同桶内两段会话互不影响。 */
+    @Test
+    fun thinkingFlagIsPerConversation_notSharedWithinAScope() {
+        val all = listOf(
+            conversation("fast", "book-a").copy(thinkingEnabled = false),
+            conversation("deep", "book-a").copy(thinkingEnabled = true)
+        )
+
+        val inScope = selectChatScope(all, "book-a")
+
+        assertEquals(listOf(false, true), inScope.map { it.thinkingEnabled })
     }
 }

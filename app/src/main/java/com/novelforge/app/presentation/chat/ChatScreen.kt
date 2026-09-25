@@ -33,15 +33,19 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
 import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.selection.TextSelectionColors
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -283,6 +287,7 @@ class ChatViewModel(
                 if (latest != null) {
                     _activeId.value = latest.id
                     _messages.value = latest.messages.map { m -> m.toUiMessage() }
+                    _thinkingEnabled.value = latest.thinkingEnabled
                 } else {
                     _activeId.value = newConversationId()
                 }
@@ -313,7 +318,10 @@ class ChatViewModel(
                 )
             },
             // 落进当前作用域的桶：没有书上下文就是全局「灵感」桶
-            projectId = _projectScope.value
+            projectId = _projectScope.value,
+            // 必须带上：persistCurrent 每次发消息都会整段重写会话，
+            // 不带这个字段的话，用户刚关掉的「思考」会被下一次发送悄悄改回开着
+            thinkingEnabled = _thinkingEnabled.value
         )
         viewModelScope.launch { runCatching { historyStore.save(conversation) } }
     }
@@ -364,6 +372,7 @@ class ChatViewModel(
     fun send(input: String) {
         val text = input.trim()
         val pending = _pendingAttachments.value
+        val thinkingOn = _thinkingEnabled.value
         // 光图没字也是一次有效提问（「这是什么？」不必打字），所以不能只判 text
         if ((text.isEmpty() && pending.isEmpty()) || _busy.value) return
         _error.value = null
@@ -395,7 +404,10 @@ class ChatViewModel(
                         supportsJsonObject = false,
                         supportsUsageInStream = false
                     ),
-                    disableThinking = false
+                    // 关掉思考时要**明确告诉服务商别思考**（disableThinking）。
+                    // 只把 includeReasoning 设为 false 是不够的：不少模型照样先
+                    // thinking 很久，只是不把过程返回给你，表现就是「关了还是慢」。
+                    disableThinking = !thinkingOn
                 )
                 providerName = settings.providerName
                 modelName = settings.model
@@ -431,7 +443,7 @@ class ChatViewModel(
                         outputTokenBudget = 4_096,
                         requestId = "chat-${System.currentTimeMillis()}",
                         stream = true,
-                        includeReasoning = true
+                        includeReasoning = thinkingOn
                     )
                 )
                 var received = false
@@ -537,12 +549,35 @@ class ChatViewModel(
         _activeId.value = newConversationId()
     }
 
+    private val _thinkingEnabled = MutableStateFlow(true)
+    val thinkingEnabled: StateFlow<Boolean> = _thinkingEnabled.asStateFlow()
+
+    /**
+     * 切换「显示思考过程」。
+     *
+     * 关掉时两件事一起做：不给模型要 reasoning_content，同时明确告诉服务商别思考。
+     * 只做前者不够 —— 有些模型照样先 thinking 很久，只是不返回给你，
+     * 表现出来就是「关了还是慢」。请求上带 disableThinking 才是真关。
+     */
+    fun setThinking(enabled: Boolean) {
+        _thinkingEnabled.value = enabled
+        viewModelScope.launch {
+            runCatching {
+                val id = _activeId.value
+                if (id.isEmpty()) return@launch
+                historyStore.updateThinking(id, _projectScope.value, enabled)
+            }
+        }
+    }
+
     fun openConversation(id: String) {
         if (_busy.value || id == _activeId.value) return
         val convo = _conversations.value.firstOrNull { it.id == id } ?: return
         resetStreamBuffer()
         _error.value = null
         _activeId.value = id
+        // 思考开关是**按会话**记的：换一段对话就该用那段自己的设置
+        _thinkingEnabled.value = convo.thinkingEnabled
         _messages.value = convo.messages.map { m -> m.toUiMessage() }
     }
 
@@ -635,7 +670,6 @@ private val chatTimeFormat = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault()
  * 文件已经被删（清理过、或历史从别处导入）时只显示占位，不崩。
  * onRemove 非空时右上角有删除键；用户气泡里传 null —— 已经发出去的消息不该能删附件。
  */
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun AttachmentStrip(
     attachments: List<StoredAttachment>,
@@ -763,8 +797,7 @@ private fun openImage(context: android.content.Context, path: String) {
     }
 }
 
-/** 取附件显示名，拿不到就用末段文件名。 */
-private fun queryDisplayName(context: android.content.Context, uri: android.net.Uri): String {
+/** 取附件显示名，拿不到就用末段文件名。 */private fun queryDisplayName(context: android.content.Context, uri: android.net.Uri): String {
     val fromProvider = runCatching {
         context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
             val index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
@@ -776,6 +809,64 @@ private fun queryDisplayName(context: android.content.Context, uri: android.net.
         ?: "附件"
 }
 
+/** 整段复制到剪贴板。Android 13+ 系统会自己弹「已复制」提示，不要重复弹。 */
+private fun copyToClipboard(context: android.content.Context, label: String, text: String) {
+    runCatching {
+        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+            as? android.content.ClipboardManager ?: return
+        clipboard.setPrimaryClip(android.content.ClipData.newPlainText(label, text))
+    }
+}
+
+/**
+ * 气泡下方的复制按钮行。
+ *
+ * 摆在正文下面的正常竖向流里，不叠在文字上 —— 叠上去的点击手势会和
+ * SelectionContainer 的长按选词抢同一个按下事件，二选一。
+ * 这里选了选词（系统工具栏自带复制/全选/分享），把"整段拿走"用按钮补上。
+ */
+@Composable
+private fun CopyRow(text: String, reasoning: String, tint: androidx.compose.ui.graphics.Color? = null) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val color = tint ?: MaterialTheme.colorScheme.onSurfaceVariant
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (text.isNotBlank()) {
+            CopyButton("复制", color) {
+                copyToClipboard(context, "NovelForge", text)
+            }
+        }
+        if (reasoning.isNotBlank()) {
+            CopyButton("复制思考", color) {
+                copyToClipboard(context, "NovelForge 思考过程", reasoning)
+            }
+        }
+    }
+}
+
+@Composable
+private fun CopyButton(label: String, tint: androidx.compose.ui.graphics.Color, onCopy: () -> Unit) {
+    Text(
+        label,
+        style = MaterialTheme.typography.labelMedium,
+        color = tint,
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(onClick = onCopy)
+            // 内边距必须在 clickable **之后**才是真的把点击区撑大。
+            // 顺序反了的话 padding 落在手势区外面，命中区只剩文字本身：
+            // "复制"两个字大约 28×16dp，远低于 48dp 最小点击区。
+            .padding(horizontal = 8.dp, vertical = 10.dp)
+            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+    )
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun ChatScreen(
     viewModel: ChatViewModel,
@@ -792,6 +883,7 @@ fun ChatScreen(
     var historyOpen by remember { mutableStateOf(false) }
     var touching by remember { mutableStateOf(false) }
     var pickerMenuOpen by remember { mutableStateOf(false) }
+    val thinkingOn by viewModel.thinkingEnabled.collectAsStateWithLifecycle()
     val pendingAttachments by viewModel.pendingAttachments.collectAsStateWithLifecycle()
     val attachmentNotice by viewModel.attachmentNotice.collectAsStateWithLifecycle()
     // 破坏性操作先记在这里，等用户点确认才真的动手
@@ -835,14 +927,45 @@ fun ChatScreen(
             subtitle = "聊聊设定、段落和走向",
             onBack = onBack,
             trailing = {
+                // 思考开关放在顶栏而不是设置页：它是「这段对话要不要我动脑子」，
+                // 属于使用姿势而不是全局偏好。设置页那个「关闭思考模式」管的是
+                // 大纲和正文生成，两者刻意分开。
+                // 「清空」搬去了历史面板：顶栏塞三样东西会把标题挤成「灵感…」，
+                // 而且破坏性操作本来就该和会话管理待在一起。
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    // 合并成一个语义节点：不然读屏会把旁边的"思考"两个字当静态
+                    // 文字念一遍，再单独念一次开关，听起来像两样东西。
+                    // 合并后 Switch 自己贡献「开关 / 已开启」，父节点给名字。
+                    modifier = Modifier.semantics(mergeDescendants = true) {
+                        contentDescription = "显示思考过程"
+                        stateDescription = if (thinkingOn) "已开启" else "已关闭"
+                    }
+                ) {
+                    Text(
+                        "思考",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Switch(
+                        checked = thinkingOn,
+                        onCheckedChange = viewModel::setThinking,
+                        enabled = !busy
+                    )
+                }
                 TextButton(onClick = { historyOpen = !historyOpen }) {
                     Text(if (historyOpen) "收起" else "历史")
                 }
-                TextButton(onClick = { confirmClear = true }, enabled = messages.isNotEmpty()) {
-                    Text("清空")
-                }
             }
         )
+        if (!thinkingOn) {
+            Text(
+                "思考已关闭：回答更快、更省 token，但看不到推理过程。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
 
         // 消息区（reverseLayout：最新消息贴底，增长时天然跟随）
         Box(
@@ -859,6 +982,14 @@ fun ChatScreen(
                             val event = awaitPointerEvent(PointerEventPass.Main)
                             val change = event.changes.firstOrNull { it.id == down.id } ?: break
                             if (!change.pressed) break
+                            // 长按选中文字后往下拖，选择手势会逐帧 consume 位移。
+                            // 不看 consumed 的话，**单行**内拖选时 dx 一路过 18dp、
+                            // dy 约等于 0，就会被误判成横滑、把历史抽屉弹开，
+                            // 抽屉盖上来顺手把这次选词也毁了。1.4 倍的竖向压制
+                            // 只能救跨行选择，救不了单行 —— 判据得是"别人吃没吃"。
+                            // 这个 Box 是整块消息区的祖先，选择手势在更深处，
+                            // 同一帧 Main pass 上轮到它时 consume 已经发生了。
+                            if (change.isConsumed) break
                             val dx = change.position.x - down.position.x
                             val dy = change.position.y - down.position.y
                             if (!decided && abs(dx) > swipeThreshold && abs(dx) > abs(dy) * 1.4f) {
@@ -913,13 +1044,28 @@ fun ChatScreen(
                     // 清空/换会话后思考的折叠状态还会串到别的气泡上
                     items(reversed, key = { it.id }) { message ->
                         val isUser = message.role == ChatRole.USER
-                        // 长按可选中复制模型生成的正文/思考片段
+                        // SelectionContainer 只管选词，**绝对不要**在气泡上再装
+                        // clickable / combinedClickable / pointerInput：
+                        // 那几个都会 down.consume()，把外层选择手势的按键事件吃掉，
+                        // 长按拖选就彻底废了（长按复制、全选、分享全没了）。
+                        // 所以「整条复制」做成气泡下方的一行按钮，
+                        // 它在正常竖向流里，不盖住任何文字。
                         SelectionContainer {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
                             ) {
                                 if (isUser) {
+                                    // 默认的选中高亮是浅色半透明，压在 primary 深底上
+                                    // 几乎看不出来 —— 用户按住字以为没反应，又按一次。
+                                    // 换成 onPrimary（气泡文字色）做高亮色，深底浅字才看得见。
+                                    val onPrimary = MaterialTheme.colorScheme.onPrimary
+                                    CompositionLocalProvider(
+                                        LocalTextSelectionColors provides TextSelectionColors(
+                                            handleColor = onPrimary,
+                                            backgroundColor = onPrimary.copy(alpha = 0.35f)
+                                        )
+                                    ) {
                                     Box(
                                         modifier = Modifier
                                             .fillMaxWidth(0.82f)
@@ -943,7 +1089,16 @@ fun ChatScreen(
                                                     color = MaterialTheme.colorScheme.onPrimary
                                                 )
                                             }
+                                            // 自己的提问也常要复制走（改一改重问、贴到别处）
+                                            if (message.text.isNotBlank()) {
+                                                CopyRow(
+                                                    text = message.text,
+                                                    reasoning = "",
+                                                    tint = onPrimary.copy(alpha = 0.75f)
+                                                )
+                                            }
                                         }
+                                    }
                                     }
                                 } else {
                                     Surface(
@@ -971,6 +1126,11 @@ fun ChatScreen(
                                             val reasoningLong =
                                                 message.reasoning.length > REASONING_PREVIEW_CHARS
                                             if (message.reasoning.isNotBlank()) {
+                                                // 这两个折叠标签是气泡里唯一"故意不让选词"的地方：
+                                                // 它们自己就是手势控件，选中它们没有意义。
+                                                // 但也正因为是控件，命中区得补到 48dp ——
+                                                // labelSmall 一行只有 16dp 高，长得跟普通文字一样，
+                                                // 会被当成正文去长按选词，然后发现点不动。
                                                 Text(
                                                     if (message.streaming) "思考中…" else "已完成思考 · 点击展开/收起",
                                                     style = MaterialTheme.typography.labelSmall,
@@ -983,6 +1143,7 @@ fun ChatScreen(
                                                             onValueChange = { reasoningOpen = it },
                                                             role = Role.Button
                                                         )
+                                                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
                                                         .semantics {
                                                             stateDescription =
                                                                 if (reasoningOpen) "已展开" else "已收起"
@@ -1014,7 +1175,14 @@ fun ChatScreen(
                                                                 .padding(bottom = 8.dp)
                                                                 .toggleable(
                                                                     value = reasoningFull,
-                                                                    onValueChange = { reasoningFull = it }
+                                                                    onValueChange = { reasoningFull = it },
+                                                                    // 和上面那个保持一致：这是展开/收起，
+                                                                    // 不是开关，说成"按钮 + 已展开"更贴切
+                                                                    role = Role.Button
+                                                                )
+                                                                .defaultMinSize(
+                                                                    minWidth = 48.dp,
+                                                                    minHeight = 48.dp
                                                                 )
                                                                 .semantics {
                                                                     stateDescription =
@@ -1047,6 +1215,20 @@ fun ChatScreen(
                                                     "…",
                                                     style = MaterialTheme.typography.bodyMedium,
                                                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+
+                                            // 整条复制。放在正文**下面**而不是长按菜单里：
+                                            // 长按菜单必须盖在气泡上，会把选择手势的按键事件吃掉，
+                                            // 而这个 app 的产出是几千字的方案和推理，
+                                            // 读者想要的是"整段拿走"，长按选词反而给不了。
+                                            // 流式过程中不给按钮：半句话复制出来没意义。
+                                            if (!message.streaming &&
+                                                (message.text.isNotBlank() || message.reasoning.isNotBlank())
+                                            ) {
+                                                CopyRow(
+                                                    text = message.text,
+                                                    reasoning = message.reasoning
                                                 )
                                             }
                                         }
@@ -1129,6 +1311,15 @@ fun ChatScreen(
                             accent = true,
                             modifier = Modifier.fillMaxWidth(),
                             enabled = !busy
+                        )
+                        // 清空当前对话：破坏性、不可撤销，所以从顶栏挪到这里，
+                        // 而且要点两下（先按按钮，再在弹窗里确认）
+                        PaperButton(
+                            text = "清空当前对话",
+                            onClick = { confirmClear = true },
+                            accent = false,
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !busy && messages.isNotEmpty()
                         )
                         LazyColumn(
                             modifier = Modifier.weight(1f),

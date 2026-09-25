@@ -27,12 +27,31 @@ class MarkdownInlineTest {
         sink: MathInlineSink? = null
     ) = buildMarkdownInline(source, sink)
 
-    /** AnnotatedString 的标注是带区间参数的方法，不是属性。 */
+    /**
+     * 链接标注的扁平视图：url + 覆盖区间。
+     *
+     * 现在链接只挂 [LinkAnnotation.Url]，不再发 stringAnnotation —— 后者唯一的
+     * 用途是让人自己写指针命中测试，而那会把外层 SelectionContainer 的长按
+     * 选词饿死（用户报"长按不能复制"）。
+     */
+    private data class UrlSpan(val url: String, val start: Int, val end: Int)
+
     private fun urlsOf(out: androidx.compose.ui.text.AnnotatedString) =
-        out.getStringAnnotations(URL_TAG, 0, out.length)
+        out.getLinkAnnotations(0, out.length).map {
+            UrlSpan((it.item as LinkAnnotation.Url).url, it.start, it.end)
+        }
 
     private fun linksOf(out: androidx.compose.ui.text.AnnotatedString) =
         out.getLinkAnnotations(0, out.length)
+
+    /**
+     * 护栏：不得再发任何 tag 标注。
+     *
+     * 哪天有人又加回 stringAnnotation，多半就是想自己装 pointerInput 去点链接，
+     * 而那正好会把长按选词重新打死。
+     */
+    private fun tagsOf(out: androidx.compose.ui.text.AnnotatedString) =
+        out.getStringAnnotations(0, out.length)
 
     private fun mathSinkFor(parts: MutableMap<String, MathPart>) = MathInlineSink { builder, s ->
         appendMathExpression(builder, s, MathStyle(), parts)
@@ -222,19 +241,15 @@ class MarkdownInlineTest {
         assertEquals("文字", out.text)
         val links = urlsOf(out)
         assertEquals(1, links.size)
-        assertEquals("https://example.com", links[0].item)
+        assertEquals("https://example.com", links[0].url)
         assertEquals(0 to 2, links[0].start to links[0].end)
         assertEquals(1, linksOf(out).size)
-        assertEquals(
-            "https://example.com",
-            (linksOf(out)[0].item as LinkAnnotation.Url).url
-        )
     }
 
     @Test
     fun markdownLink_dropsTheTitle() {
         val out = styled("[文字](https://example.com \"点我\")")
-        assertEquals("https://example.com", urlsOf(out).first().item)
+        assertEquals("https://example.com", urlsOf(out).first().url)
     }
 
     @Test
@@ -254,7 +269,7 @@ class MarkdownInlineTest {
         assertEquals("地址 https://example.com 就行", out.text)
         val links = urlsOf(out)
         assertEquals(1, links.size)
-        assertEquals("https://example.com", links[0].item)
+        assertEquals("https://example.com", links[0].url)
         // "地址 " 占 3 个字符，网址本身 19 个
         assertEquals(3 to 22, links[0].start to links[0].end)
     }
@@ -263,34 +278,60 @@ class MarkdownInlineTest {
     fun bareUrl_stripsTrailingPunctuation() {
         val out = styled("见 https://example.com。")
         val links = urlsOf(out)
-        assertEquals("https://example.com", links[0].item)
+        assertEquals("https://example.com", links[0].url)
     }
 
     @Test
     fun angleAutolink_works() {
         val out = styled("<https://a.cn/x>")
         assertEquals("https://a.cn/x", out.text)
-        assertEquals("https://a.cn/x", urlsOf(out).first().item)
+        assertEquals("https://a.cn/x", urlsOf(out).first().url)
     }
 
     @Test
     fun emailAutolink_becomesMailto() {
         val out = styled("<hi@a.cn>")
-        assertEquals("mailto:hi@a.cn", urlsOf(out).first().item)
+        assertEquals("mailto:hi@a.cn", urlsOf(out).first().url)
     }
 
     @Test
-    fun useLinkAnnotations_off_leavesOnlyStringAnnotations() {
-        val out = buildMarkdownInline(
+    fun linksAlwaysCarryALinkAnnotationAndNeverATagAnnotation() {
+        // 只有一种给法：LinkAnnotation。tag 标注是留给指针命中测试的，
+        // 而那会打死长按选词，所以它必须恒空。
+        val out = buildMarkdownInline("[文字](https://a.cn)")
+        assertEquals(1, linksOf(out).size)
+        assertTrue(tagsOf(out).isEmpty())
+    }
+
+    /**
+     * 任何输入都不得产出 tag 标注。
+     *
+     * stringAnnotation 唯一的作用是"自己拿它做指针命中测试"。而任何这样做的
+     * pointerInput 都会 consume 按下事件，把气泡外层 SelectionContainer 的
+     * 长按选词打死 —— 这正是本文件一度出现的 bug。留着这个开关等于把修好的
+     * 坑重新挖开，所以从产出侧钉死。
+     */
+    @Test
+    fun noInputEverEmitsAStringAnnotation() {
+        val inputs = listOf(
             "[文字](https://a.cn)",
-            useLinkAnnotations = false
+            "https://example.com",
+            "<hi@a.cn>",
+            "<https://a.cn>",
+            "**粗**[链接](https://a.cn)",
+            "[带标题](https://a.cn \"t\")",
+            "普通一段话"
         )
-        assertEquals(1, urlsOf(out).size)
-        assertTrue(linksOf(out).isEmpty())
+        for (input in inputs) {
+            val out = buildMarkdownInline(input)
+            assertTrue(
+                "输入 <$input> 产出了 tag 标注：" + tagsOf(out).joinToString(),
+                tagsOf(out).isEmpty()
+            )
+        }
     }
 
     // ---------- 转义 ----------
-
     @Test
     fun escapedAsterisk_rendersLiterally() {
         val out = styled("\\*不是斜体\\*")

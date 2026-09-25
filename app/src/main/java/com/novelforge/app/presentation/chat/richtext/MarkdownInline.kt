@@ -18,9 +18,6 @@ import androidx.compose.ui.text.style.TextDecoration
  * left/right-flanking 规则 —— 光找配对符号的话 `2 * 3 * 4` 会被吃掉。
  */
 
-/** 链接的 stringAnnotation tag。ChatRichText 靠它把点击位置换算成 url。 */
-const val URL_TAG: String = "novelforge://url"
-
 /**
  * 行内公式的接入点。
  *
@@ -62,19 +59,14 @@ data class InlineStyleOptions(
  * 把一段行内 markdown 渲染成 [AnnotatedString]。
  *
  * @param mathSink 行内公式渲染器；为 null 时 `$x$` 原样输出。
- * @param useLinkAnnotations true 时挂 [LinkAnnotation]，系统会把它当可点链接
- *   （TalkBack 念得出「链接」，点按交给浏览器）；false 时只挂 stringAnnotation，
- *   由 ChatRichText 自己用 onLinkClick 接管点击 —— 两种给法不能同时开，
- *   否则一次点击会被处理两遍。
  */
 fun buildMarkdownInline(
     text: String,
     mathSink: MathInlineSink? = null,
-    options: InlineStyleOptions = InlineStyleOptions(),
-    useLinkAnnotations: Boolean = true
+    options: InlineStyleOptions = InlineStyleOptions()
 ): AnnotatedString {
     val builder = AnnotatedString.Builder(text.length + 16)
-    builder.appendNodes(parseInlineMarkdown(text), options, mathSink, useLinkAnnotations)
+    builder.appendNodes(parseInlineMarkdown(text), options, mathSink)
     return builder.toAnnotatedString()
 }
 
@@ -86,8 +78,7 @@ fun parseInlineMarkdown(text: String): List<InlineNode> = parseInline(text)
 private fun AnnotatedString.Builder.appendNodes(
     nodes: List<InlineNode>,
     options: InlineStyleOptions,
-    mathSink: MathInlineSink?,
-    useLinkAnnotations: Boolean
+    mathSink: MathInlineSink?
 ) {
     for (node in nodes) {
         when (node) {
@@ -105,18 +96,19 @@ private fun AnnotatedString.Builder.appendNodes(
 
             is InlineNode.Styled -> {
                 pushStyle(node.style)
-                appendNodes(node.children, options, mathSink, useLinkAnnotations)
+                appendNodes(node.children, options, mathSink)
                 pop()
             }
 
             is InlineNode.Link -> {
                 pushStyle(options.link)
-                pushStringAnnotation(URL_TAG, node.url)
-                if (useLinkAnnotations) {
-                    pushLink(LinkAnnotation.Url(node.url, TextLinkStyles(style = options.link)))
-                }
-                appendNodes(node.label, options, mathSink, useLinkAnnotations)
-                if (useLinkAnnotations) pop()
+                // 只挂 LinkAnnotation：Text 自己的命中测试会把它交给
+                // LocalUriHandler，朗读也会念"链接"。
+                // 不要再 pushStringAnnotation(URL_TAG) —— 那是给指针命中测试用的，
+                // 而指针命中测试会 down.consume()，直接把外层 SelectionContainer
+                // 的长按选词饿死。留着它还会让人以为那条老路还在跑。
+                pushLink(LinkAnnotation.Url(node.url, TextLinkStyles(style = options.link)))
+                appendNodes(node.label, options, mathSink)
                 pop()
                 pop()
             }

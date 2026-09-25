@@ -1,13 +1,18 @@
 package com.novelforge.app.presentation.chat
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,7 +24,9 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -39,6 +46,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -48,6 +56,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -63,8 +74,10 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.novelforge.app.data.chat.ChatHistoryStore
+import com.novelforge.app.data.chat.StoredAttachment
 import com.novelforge.app.data.chat.StoredChatMessage
 import com.novelforge.app.data.chat.StoredConversation
+import com.novelforge.app.presentation.chat.richtext.ChatRichText
 import com.novelforge.app.data.security.ApiKeyStore
 import com.novelforge.app.data.settings.AppSettingsStore
 import com.novelforge.app.infrastructure.llm.ChatMessage
@@ -80,12 +93,14 @@ import com.novelforge.app.ui.theme.PaperButton
 import com.novelforge.app.ui.theme.PaperShape
 import com.novelforge.app.ui.theme.PaperSurface
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -101,7 +116,12 @@ data class UiChatMessage(
      * 按位置复用槽位时，流式刷新会把整棵子树重建，折叠状态也会串到别的气泡上。
      * 放在最后且带默认值，老的构造调用（不传 id）一处都不用改。
      */
-    val id: String = newMessageId()
+    val id: String = newMessageId(),
+    /**
+     * 这条消息带的附件。存的是路径不是字节 —— 见 ChatAttachmentStore 的注释。
+     * 气泡上要显示缩略图、请求时要重新读文件，两处都只拿得到路径。
+     */
+    val attachments: List<StoredAttachment> = emptyList()
 )
 
 /** 消息 id：每个新气泡一个，copy() 会原样带过去。 */
@@ -122,7 +142,8 @@ class ChatViewModel(
     private val apiKeyStore: ApiKeyStore,
     private val client: OpenAiCompatibleClient,
     private val historyStore: ChatHistoryStore,
-    private val llmCallRepository: com.novelforge.app.domain.repository.LlmCallRepository
+    private val llmCallRepository: com.novelforge.app.domain.repository.LlmCallRepository,
+    private val attachmentStore: com.novelforge.app.data.chat.ChatAttachmentStore
 ) : ViewModel() {
     private val _messages = MutableStateFlow<List<UiChatMessage>>(emptyList())
     val messages: StateFlow<List<UiChatMessage>> = _messages.asStateFlow()
@@ -287,7 +308,8 @@ class ChatViewModel(
                 StoredChatMessage(
                     role = if (m.role == ChatRole.USER) "user" else "assistant",
                     text = m.text,
-                    reasoning = m.reasoning
+                    reasoning = m.reasoning,
+                    attachments = m.attachments
                 )
             },
             // 落进当前作用域的桶：没有书上下文就是全局「灵感」桶
@@ -296,14 +318,61 @@ class ChatViewModel(
         viewModelScope.launch { runCatching { historyStore.save(conversation) } }
     }
 
+    /**
+     * 输入框上方待发送的附件。发送成功才落到消息上；用户中途删掉或退出，
+     * 走 clearPendingAttachments 时要把落盘的文件一并删掉，否则攒一堆孤儿图。
+     */
+    private val _pendingAttachments = MutableStateFlow<List<StoredAttachment>>(emptyList())
+    val pendingAttachments: StateFlow<List<StoredAttachment>> = _pendingAttachments.asStateFlow()
+
+    private val _attachmentNotice = MutableStateFlow<String?>(null)
+    val attachmentNotice: StateFlow<String?> = _attachmentNotice.asStateFlow()
+
+    fun addImageAttachment(uri: android.net.Uri, displayName: String) {
+        viewModelScope.launch {
+            _attachmentNotice.value = null
+            attachmentStore.saveImage(uri, displayName)
+                .onSuccess { _pendingAttachments.update { it + it } }
+                .onFailure { _attachmentNotice.value = it.message ?: "这张图加不进来" }
+        }
+    }
+
+    fun addDocumentAttachment(uri: android.net.Uri, displayName: String) {
+        viewModelScope.launch {
+            _attachmentNotice.value = null
+            attachmentStore.saveDocument(uri, displayName)
+                .onSuccess { _pendingAttachments.update { it + it } }
+                .onFailure { _attachmentNotice.value = it.message ?: "这个文件加不进来" }
+        }
+    }
+
+    fun removePendingAttachment(stored: StoredAttachment) {
+        _pendingAttachments.update { it - stored }
+        viewModelScope.launch { attachmentStore.delete(stored) }
+    }
+
+    fun clearPendingAttachments() {
+        val current = _pendingAttachments.value
+        _pendingAttachments.value = emptyList()
+        viewModelScope.launch { current.forEach { attachmentStore.delete(it) } }
+    }
+
+    fun clearAttachmentNotice() {
+        _attachmentNotice.value = null
+    }
+
     fun send(input: String) {
         val text = input.trim()
-        if (text.isEmpty() || _busy.value) return
+        val pending = _pendingAttachments.value
+        // 光图没字也是一次有效提问（「这是什么？」不必打字），所以不能只判 text
+        if ((text.isEmpty() && pending.isEmpty()) || _busy.value) return
         _error.value = null
+        _attachmentNotice.value = null
         _busy.value = true
+        _pendingAttachments.value = emptyList()
         resetStreamBuffer()
         _messages.update {
-            it + UiChatMessage(ChatRole.USER, text) +
+            it + UiChatMessage(ChatRole.USER, text, attachments = pending) +
                 UiChatMessage(ChatRole.ASSISTANT, "", streaming = true)
         }
         persistCurrent()
@@ -332,10 +401,31 @@ class ChatViewModel(
                 modelName = settings.model
                 val history = _messages.value
                     .dropLast(1)
-                    .filter { it.text.isNotBlank() }
-                    .map { ChatMessage(it.role, it.text) }
+                    .filter { it.text.isNotBlank() || it.attachments.isNotEmpty() }
+                // 请求每轮都重发整段会话。图片如果全带，几轮之后请求体就是几 MB，
+                // 网关上限普遍 4–10 MB，超了只回一个没有信息量的 invalid request。
+                // 所以只带最近若干条消息的附件，更早的图明确告诉用户没带。
+                val attachmentCutoff = (history.size - ATTACHMENT_HISTORY_MESSAGES).coerceAtLeast(0)
+                var omittedAttachments = 0
+                val messages = history.mapIndexed { index, message ->
+                    val include = index >= attachmentCutoff
+                    if (!include) omittedAttachments += message.attachments.size
+                    val wire = if (include) {
+                        message.attachments.mapNotNull { attachmentStore.toChatAttachment(it) }
+                    } else {
+                        emptyList()
+                    }
+                    if (message.attachments.isNotEmpty() && wire.size < message.attachments.size) {
+                        omittedAttachments += message.attachments.size - wire.size
+                    }
+                    ChatMessage(message.role, message.text, wire)
+                }
+                if (omittedAttachments > 0) {
+                    _attachmentNotice.value =
+                        "更早的 $omittedAttachments 个附件没有包含在这次请求里（历史太长时会自动省略）"
+                }
                 val request = ChatRequest(
-                    messages = listOf(ChatMessage(ChatRole.SYSTEM, INSPIRATION_SYSTEM_PROMPT)) + history,
+                    messages = listOf(ChatMessage(ChatRole.SYSTEM, INSPIRATION_SYSTEM_PROMPT)) + messages,
                     config = config,
                     options = ChatOptions(
                         outputTokenBudget = 4_096,
@@ -464,7 +554,29 @@ class ChatViewModel(
                 _messages.value = emptyList()
                 _activeId.value = newConversationId()
             }
+            collectAttachmentGarbage()
         }
+    }
+
+    /**
+     * 清掉不再被任何会话引用的附件文件。
+     * 会话被删、消息被 trim 到只剩 40 条之后，孤儿图会一直堆着 ——
+     * 一次多图对话就能塞进几十 MB，而它们再也不会被读到。
+     */
+    private suspend fun collectAttachmentGarbage() {
+        runCatching {
+            val referenced = historyStore.conversationsIn(_projectScope.value).first()
+                .flatMap { conversation -> conversation.messages }
+                .flatMap { message -> message.attachments }
+                .map { it.path } + _pendingAttachments.value.map { it.path }
+            attachmentStore.collectGarbage(referenced)
+        }
+    }
+
+    override fun onCleared() {
+        // ViewModel 消失时把还没发出去的附件清掉：它们永远不会进任何消息
+        clearPendingAttachments()
+        super.onCleared()
     }
 
     class Factory(
@@ -472,7 +584,8 @@ class ChatViewModel(
         private val apiKeyStore: ApiKeyStore,
         private val client: OpenAiCompatibleClient,
         private val historyStore: ChatHistoryStore,
-        private val llmCallRepository: com.novelforge.app.domain.repository.LlmCallRepository
+        private val llmCallRepository: com.novelforge.app.domain.repository.LlmCallRepository,
+        private val attachmentStore: com.novelforge.app.data.chat.ChatAttachmentStore
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T = ChatViewModel(
@@ -480,15 +593,27 @@ class ChatViewModel(
             apiKeyStore,
             client,
             historyStore,
-            llmCallRepository
+            llmCallRepository,
+            attachmentStore
         ) as T
     }
 }
 
+/**
+ * 历史里最多带多少条消息的附件。
+ *
+ * 请求每轮重发整段会话，图片全带的话几轮之后请求体就是几 MB，
+ * 而 OpenAI 兼容网关的请求体上限普遍在 4–10 MB，超了只回一个
+ * 没有信息量的 invalid request。留最近 4 条既能维持"你刚发的那张图我还记得"，
+ * 又把最坏情况钉住。省略了多少会在界面上明说，不静默。
+ */
+private const val ATTACHMENT_HISTORY_MESSAGES = 4
+
 private fun StoredChatMessage.toUiMessage(): UiChatMessage = UiChatMessage(
     role = if (role == "user") ChatRole.USER else ChatRole.ASSISTANT,
     text = text,
-    reasoning = reasoning
+    reasoning = reasoning,
+    attachments = attachments
 )
 
 private val UserBubbleShape = RoundedCornerShape(20.dp, 6.dp, 20.dp, 20.dp)
@@ -502,6 +627,155 @@ private const val REASONING_PREVIEW_CHARS = 300
 
 private val chatTimeFormat = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
 
+/**
+ * 一行附件。图片显示缩略图，文档显示文件名。
+ *
+ * 缩略图**按需在 IO 线程解码**并按显示尺寸采样：一张 1568px 的图按原尺寸塞进气泡
+ * 就是 1.5 MB 乘以列表长度，而在组合期解会直接卡住滚动。
+ * 文件已经被删（清理过、或历史从别处导入）时只显示占位，不崩。
+ * onRemove 非空时右上角有删除键；用户气泡里传 null —— 已经发出去的消息不该能删附件。
+ */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable
+private fun AttachmentStrip(
+    attachments: List<StoredAttachment>,
+    tint: Color,
+    onRemove: ((StoredAttachment) -> Unit)?,
+    modifier: Modifier = Modifier
+) {
+    if (attachments.isEmpty()) return
+    val context = LocalContext.current
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        attachments.forEach { stored ->
+            val isImage = stored.mediaType.startsWith("image/")
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(tint.copy(alpha = 0.10f))
+                        .clickable(enabled = isImage) { if (isImage) openImage(context, stored.path) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isImage) {
+                        val bitmap by produceState<android.graphics.Bitmap?>(null, stored.path) {
+                            value = withContext(Dispatchers.IO) {
+                                runCatching { decodeAttachmentThumbnail(stored.path) }.getOrNull()
+                            }
+                        }
+                        val image = bitmap
+                        if (image != null) {
+                            Image(
+                                bitmap = image.asImageBitmap(),
+                                contentDescription = "附件 ${stored.name}",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Text("▨", color = tint.copy(alpha = 0.6f))
+                        }
+                    } else {
+                        Text("📄", fontSize = 20.sp)
+                    }
+                    if (onRemove != null) {
+                        Text(
+                            "✕",
+                            color = tint,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .clip(CircleShape)
+                                .background(tint.copy(alpha = 0.18f))
+                                .clickable { onRemove(stored) }
+                                .defaultMinSize(minWidth = 24.dp, minHeight = 24.dp)
+                                .wrapContentSize(Alignment.Center)
+                        )
+                    }
+                }
+                if (!isImage) {
+                    Text(
+                        stored.name,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = tint.copy(alpha = 0.8f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.width(72.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 附件缩略图：按 128px 采样，RGB_565。 */
+private fun decodeAttachmentThumbnail(path: String): android.graphics.Bitmap? {
+    val file = java.io.File(path)
+    if (!file.exists()) return null
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    android.graphics.BitmapFactory.decodeFile(path, bounds)
+    if (bounds.outWidth <= 0) return null
+    var sample = 1
+    while (bounds.outWidth / (sample * 2) >= 128) sample *= 2
+    return runCatching {
+        android.graphics.BitmapFactory.decodeFile(
+            path,
+            android.graphics.BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+            }
+        )
+    }.getOrNull()
+}
+
+/**
+ * 点开附件大图。
+ *
+ * 复用已有的那个 FileProvider（authority `${applicationId}.files`），
+ * 并且必须落在它暴露的 `cache/exports/` 下面 —— 应用私有目录外部程序读不到，
+ * 而 file_paths.xml 只声明了 exports/ 和 external-files/NovelForge/，
+ * 写到别处会直接抛 IllegalArgumentException。
+ */
+private fun openImage(context: android.content.Context, path: String) {
+    runCatching {
+        val file = java.io.File(path)
+        if (!file.exists()) return
+        val shareDir = java.io.File(context.cacheDir, "exports").apply { if (!exists()) mkdirs() }
+        val shared = java.io.File(shareDir, "share-${file.name}")
+        if (!shared.exists() || shared.length() == 0L) file.copyTo(shared, overwrite = true)
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.files",
+            shared
+        )
+        context.startActivity(
+            android.content.Intent(android.content.Intent.ACTION_VIEW)
+                .setDataAndType(uri, "image/jpeg")
+                .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        )
+    }
+}
+
+/** 取附件显示名，拿不到就用末段文件名。 */
+private fun queryDisplayName(context: android.content.Context, uri: android.net.Uri): String {
+    val fromProvider = runCatching {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
+        }
+    }.getOrNull()
+    return fromProvider?.takeIf { it.isNotBlank() }
+        ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+        ?: "附件"
+}
+
 @Composable
 fun ChatScreen(
     viewModel: ChatViewModel,
@@ -509,12 +783,17 @@ fun ChatScreen(
 ) {
     val messages by viewModel.messages.collectAsStateWithLifecycle()
     val busy by viewModel.busy.collectAsStateWithLifecycle()
+    // 附件显示名、点开大图都要用
+    val context = LocalContext.current
     val error by viewModel.error.collectAsStateWithLifecycle()
     val conversations by viewModel.conversations.collectAsStateWithLifecycle()
     val activeId by viewModel.activeId.collectAsStateWithLifecycle()
     var input by remember { mutableStateOf("") }
     var historyOpen by remember { mutableStateOf(false) }
     var touching by remember { mutableStateOf(false) }
+    var pickerMenuOpen by remember { mutableStateOf(false) }
+    val pendingAttachments by viewModel.pendingAttachments.collectAsStateWithLifecycle()
+    val attachmentNotice by viewModel.attachmentNotice.collectAsStateWithLifecycle()
     // 破坏性操作先记在这里，等用户点确认才真的动手
     var confirmClear by remember { mutableStateOf(false) }
     var deleteTarget by remember { mutableStateOf<StoredConversation?>(null) }
@@ -648,13 +927,23 @@ fun ChatScreen(
                                             .background(MaterialTheme.colorScheme.primary)
                                             .padding(horizontal = 14.dp, vertical = 10.dp)
                                     ) {
-                                        Text(
-                                            message.text,
-                                            color = MaterialTheme.colorScheme.onPrimary,
-                                            style = MaterialTheme.typography.bodyMedium.copy(
-                                                lineHeight = 22.sp
+                                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            // 用户自己的气泡要显示图：不然发完就不知道发出去的是哪张
+                                            AttachmentStrip(
+                                                attachments = message.attachments,
+                                                tint = MaterialTheme.colorScheme.onPrimary,
+                                                onRemove = null
                                             )
-                                        )
+                                            if (message.text.isNotEmpty()) {
+                                                // 用户气泡不传 onLinkClick：传了链接会染成
+                                                // primary 色，压在 primary 底上就看不见了。
+                                                // 不传时链接带真正的 LinkAnnotation，朗读会说"链接"。
+                                                ChatRichText(
+                                                    text = message.text,
+                                                    color = MaterialTheme.colorScheme.onPrimary
+                                                )
+                                            }
+                                        }
                                     }
                                 } else {
                                     Surface(
@@ -736,11 +1025,22 @@ fun ChatScreen(
                                                 }
                                             }
                                             if (message.text.isNotEmpty()) {
-                                                Text(
-                                                    message.text,
-                                                    style = MaterialTheme.typography.bodyMedium.copy(
-                                                        lineHeight = 23.sp
-                                                    )
+                                                // markdown 表格 / LaTeX / 粗体这些以前全是原始文本。
+                                                // 这里是唯一一处把模型回复渲染成富文本的地方，
+                                                // 思考链保持纯文本 —— 它是过程日志，不需要排版。
+                                                ChatRichText(
+                                                    text = message.text,
+                                                    onLinkClick = { url ->
+                                                        runCatching {
+                                                            val intent = android.content.Intent(
+                                                                android.content.Intent.ACTION_VIEW,
+                                                                android.net.Uri.parse(url)
+                                                            ).addFlags(
+                                                                android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                                            )
+                                                            context.startActivity(intent)
+                                                        }
+                                                    }
                                                 )
                                             } else if (message.streaming && message.reasoning.isBlank()) {
                                                 Text(
@@ -905,13 +1205,105 @@ fun ChatScreen(
                 style = MaterialTheme.typography.bodySmall
             )
         }
+        attachmentNotice?.let {
+            Text(
+                it,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
 
-        // 输入行：纸质输入框 + 圆形发送键
+        // 待发送的附件：可删、可点开看大图
+        if (pendingAttachments.isNotEmpty()) {
+            AttachmentStrip(
+                attachments = pendingAttachments,
+                tint = MaterialTheme.colorScheme.onSurface,
+                onRemove = viewModel::removePendingAttachment
+            )
+        }
+
+        // 输入行：加附件按钮 + 纸质输入框 + 圆形发送键
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.Bottom
         ) {
+            // 相册 / 文件。用 PhotoPicker 而不是 ACTION_GET_CONTENT：
+            // 前者不需要任何存储权限，也不给用户一份「读取你所有文件」的能力。
+            val photoLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.PickVisualMedia()
+            ) { uri ->
+                if (uri != null) {
+                    viewModel.addImageAttachment(uri, queryDisplayName(context, uri))
+                }
+            }
+            val fileLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument()
+            ) { uri ->
+                if (uri != null) {
+                    viewModel.addDocumentAttachment(uri, queryDisplayName(context, uri))
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clickable(enabled = !busy) {
+                        pickerMenuOpen = true
+                    }
+                    .semantics {
+                        contentDescription = "添加图片或文件"
+                        role = Role.Button
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("＋", style = MaterialTheme.typography.titleMedium)
+            }
+            if (pickerMenuOpen) {
+                AlertDialog(
+                    onDismissRequest = { pickerMenuOpen = false },
+                    title = { Text("加个附件") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(
+                                onClick = {
+                                    pickerMenuOpen = false
+                                    photoLauncher.launch(
+                                        androidx.activity.result.PickVisualMediaRequest(
+                                            ActivityResultContracts.PickVisualMedia.ImageOnly
+                                        )
+                                    )
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("图片（会压缩后发送）") }
+                            TextButton(
+                                onClick = {
+                                    pickerMenuOpen = false
+                                    fileLauncher.launch(
+                                        arrayOf(
+                                            "text/plain",
+                                            "text/markdown",
+                                            "text/csv",
+                                            "application/json",
+                                            "application/xml"
+                                        )
+                                    )
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("文本文件（txt / md / csv / json）") }
+                            Text(
+                                "图片和文本会一起发给模型。模型不支持图片时会直接报错。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { pickerMenuOpen = false }) { Text("取消") }
+                    }
+                )
+            }
             PaperSurface(modifier = Modifier.weight(1f)) {
                 OutlinedTextField(
                     value = input,
@@ -934,7 +1326,8 @@ fun ChatScreen(
                 )
             }
             // 二选一：生成中=停止键，空闲=发送键
-            val canSend = !busy && input.isNotBlank()
+            // 光图没字也算一次有效提问，所以附件在时不能把发送键置灰
+            val canSend = !busy && (input.isNotBlank() || pendingAttachments.isNotEmpty())
             Box(
                 modifier = Modifier
                     .size(52.dp)

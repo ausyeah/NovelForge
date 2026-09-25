@@ -3,6 +3,8 @@ package com.novelforge.app.infrastructure.llm
 import com.novelforge.app.domain.model.LlmUsage
 import java.io.IOException
 import java.net.InetAddress
+import java.util.Base64
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
@@ -80,6 +82,9 @@ class OpenAiCompatibleClient(
     override fun streamChat(request: ChatRequest): Flow<StreamEvent> = channelFlow {
         validateBaseUrl(request.config.baseUrl)
         val includeReasoning = request.options.includeReasoning
+        // buildRequest 内部会切到 Dispatchers.IO 做 base64 编码：
+        // channelFlow 的生产者跑在调用方上下文（ChatScreen 里就是 Main），
+        // 不切线程的话两张满尺寸图能把主线程卡出 ANR。
         val call = httpClient.newCall(buildRequest(request.copy(options = request.options.copy(stream = true))))
         request.options.timeoutMs?.let { timeoutMs ->
             call.timeout().timeout(timeoutMs, TimeUnit.MILLISECONDS)
@@ -88,7 +93,7 @@ class OpenAiCompatibleClient(
             var response: Response? = null
             try {
                 response = call.execute()
-                if (!response.isSuccessful) throw httpException(response)
+                if (!response.isSuccessful) throw httpError(response, request)
                 val body = response.body ?: throw ProviderProtocolException("响应没有 body")
                 // 两个终止标记要分开记：
                 //  - sawFinishReason：真的收到了 finish_reason
@@ -243,14 +248,14 @@ class OpenAiCompatibleClient(
         json.parseToJsonElement(body).jsonObject
     }.getOrNull()
 
-    private fun executeChat(request: ChatRequest): LlmResponse {
+    private suspend fun executeChat(request: ChatRequest): LlmResponse {
         val call = httpClient.newCall(buildRequest(request))
         request.options.timeoutMs?.let { timeoutMs ->
             call.timeout().timeout(timeoutMs, TimeUnit.MILLISECONDS)
         }
         val response = call.execute()
         response.use {
-            if (!it.isSuccessful) throw httpException(it)
+            if (!it.isSuccessful) throw httpError(it, request)
             val body = it.body?.string().orEmpty()
             val root = parseResponseObject(body)
             root["error"]?.let { error ->
@@ -326,7 +331,15 @@ class OpenAiCompatibleClient(
         else -> null
     }
 
-    private fun buildRequest(request: ChatRequest): Request {
+    /**
+     * 组装请求。chat() 与 streamChat() 共用这一个方法（唯一差别是 options.stream），
+     * 所以多模态的序列化只需要在这里做一次。
+     *
+     * 挂成 suspend + withContext(IO)：base64 编码和整段 JSON 字符串拼接都是纯 CPU 的重活，
+     * 2 MB 的图编出来接近 3 MB 文本。chat() 本身已经在 IO 上，但 streamChat() 的
+     * channelFlow 生产者跑在调用方上下文（聊天页是 Main），必须自己切。
+     */
+    private suspend fun buildRequest(request: ChatRequest): Request = withContext(Dispatchers.IO) {
         val endpoint = endpointUrl(request.config.baseUrl, request.config.capabilities.chatCompletionsPath)
         val body = buildJsonObject {
             put("model", request.config.model)
@@ -334,7 +347,17 @@ class OpenAiCompatibleClient(
                 request.messages.forEach { message ->
                     add(buildJsonObject {
                         put("role", message.role.wireValue)
-                        put("content", message.content)
+                        // 无附件时 content 保持纯字符串，形状一个字节都不变。
+                        // 这条是硬约束：大纲/正文生成整轮共用同一段系统提示，
+                        // 一旦 content 从 string 变成 array，前缀缓存的命中边界就全废了
+                        // （账单直接翻倍）；而且只认 string content 的
+                        // OpenAI 兼容实现会直接 400。OpenAiCompatibleClientTest 里有断言守着它。
+                        val parts = contentParts(message)
+                        if (parts.isEmpty()) {
+                            put("content", message.content)
+                        } else {
+                            put("content", parts)
+                        }
                     })
                 }
             })
@@ -374,13 +397,107 @@ class OpenAiCompatibleClient(
                 }
             }
         }
-        return Request.Builder()
+        Request.Builder()
             .url(endpoint)
             .headers(authHeaders(request.config))
             .header("Accept", if (request.options.stream) "text/event-stream" else "application/json")
             .header("X-Client-Request-Id", request.options.requestId)
             .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
             .build()
+    }
+
+    /**
+     * 组装多模态 content 数组。没有附件（或附件全被规则滤掉）时返回空数组，
+     * 调用方据此退回字符串形态的 content。
+     *
+     * 顺序刻意定为「正文 → 文档 → 图片」：文本在前能让「同一个问题 + 不同配图」
+     * 复用同一段前缀，换图只失效最后几段；反过来则每次都要重算整段提示词。
+     */
+    private fun contentParts(message: ChatMessage): JsonArray {
+        if (message.attachments.isEmpty()) return JsonArray(emptyList())
+        val documents = message.attachments.filterIsInstance<ChatAttachment.Document>()
+        documents.forEach { document ->
+            if (document.text.length > MAX_DOCUMENT_CHARS) {
+                throw ProviderProtocolException(
+                    "文档「${document.name}」太长了（${document.text.length} 字），" +
+                        "换一个小一点的文件（上限 $MAX_DOCUMENT_CHARS 字）"
+                )
+            }
+        }
+        val images = if (message.role == ChatRole.USER) {
+            message.attachments.filterIsInstance<ChatAttachment.Image>()
+        } else {
+            // 协议规定 image_url 只能出现在 user 轮。历史消息里误挂的图片
+            // （例如日后加「基于上一条重问」）会被网关判成非法请求直接 400，
+            // 整轮对话一起完蛋。宁可少一张图，也不要整次请求失败，所以这里静默丢弃。
+            emptyList()
+        }
+        return buildJsonArray {
+            if (message.content.isNotEmpty()) add(textPart(message.content))
+            documents.forEach { document ->
+                // 头部点名文件：模型才知道这段文字是用户给的资料而不是新的指令，
+                // 也能在回答里正确引用「你上传的那个 txt」。
+                add(textPart("【附件：${document.name}】\n${document.text}"))
+            }
+            encodeImages(images).forEach { (image, base64) ->
+                add(
+                    buildJsonObject {
+                        put("type", "image_url")
+                        put(
+                            "image_url",
+                            buildJsonObject { put("url", "data:${image.wireMediaType};base64,$base64") }
+                        )
+                    }
+                )
+            }
+        }
+    }
+
+    private fun textPart(text: String): JsonObject = buildJsonObject {
+        put("type", "text")
+        put("text", text)
+    }
+
+    /**
+     * 先按 4/3 的膨胀率预估长度、确认不超限，再真的编码。
+     * 反过来做的话，一张超限的几 MB 图片要白白编一遍才发现要抛异常。
+     */
+    private fun encodeImages(
+        images: List<ChatAttachment.Image>
+    ): List<Pair<ChatAttachment.Image, String>> {
+        var totalChars = 0L
+        return images.map { image ->
+            if (image.bytes.size > MAX_IMAGE_BYTES) {
+                throw ProviderProtocolException(
+                    "图片「${image.name}」太大了（${formatMb(image.bytes.size.toLong())} MB），" +
+                        "换一张小一点的（单张上限 ${formatMb(MAX_IMAGE_BYTES)} MB）"
+                )
+            }
+            val predicted = base64Length(image.bytes.size)
+            if (totalChars + predicted > MAX_TOTAL_BASE64_CHARS) {
+                throw ProviderProtocolException(
+                    "这次带的图片太多了（base64 之后超过 ${formatMb(MAX_TOTAL_BASE64_CHARS)} MB），" +
+                        "删掉或缩小一部分再发（单张上限 ${formatMb(MAX_IMAGE_BYTES)} MB）"
+                )
+            }
+            totalChars += predicted
+            // java.util.Base64 而不是 android.util.Base64：
+            //  - 前者从不插换行（等价于 NO_WRAP），后者默认每 76 字符一个 \n，
+            //    而 data URI 里混进换行，部分网关会直接判定请求体损坏；
+            //  - 前者在 JVM 上可用，于是这段编码逻辑能被单元测试真跑一遍。
+            image to Base64.getEncoder().encodeToString(image.bytes)
+        }
+    }
+
+    /** base64 之后的长度：每 3 字节变 4 字符，末尾补 '='。 */
+    private fun base64Length(rawSize: Int): Long = ((rawSize + 2L) / 3L) * 4L
+
+    /** 固定 Locale.ROOT，避免某些语言环境下小数点变逗号混进中文提示。 */
+    private fun formatMb(bytes: Long): String =
+        String.format(Locale.ROOT, "%.1f", bytes / 1024.0 / 1024.0)
+
+    private fun sendsImages(request: ChatRequest): Boolean = request.messages.any { message ->
+        message.role == ChatRole.USER && message.attachments.any { it is ChatAttachment.Image }
     }
 
     private fun authHeaders(config: LLMConnectionConfig): Headers {
@@ -391,7 +508,17 @@ class OpenAiCompatibleClient(
         }
     }
 
-    private fun httpException(response: Response): ProviderHttpException {
+    /**
+     * 把非 2xx 响应变成异常。
+     *
+     * 绝大多数情况就是 ProviderHttpException，providerMessage 里带着服务商原话。
+     * 唯一的特判是「模型不支持图片」：这类 400 的错误体往往只有一句
+     * "model does not support image input"，原样透传的话用户看到的是一句看不懂的英文，
+     * 根本不知道该换模型还是该删图。仍然返回 ProviderHttpException（而不是
+     * ProviderProtocolException），因为后者在 GenerationRuntime.isRetryable 里被
+     * 当成「多半是限流，值得重试」，会让一个永远不会自愈的能力问题白白重试三次。
+     */
+    private fun httpError(response: Response, request: ChatRequest): RuntimeException {
         // Retry-After 既可能是秒数也可能是 HTTP 日期，后者现在会被静默丢掉，
         // 于是限流退避只按本地指数退避走，必然再撞一次 429。
         val retryAfter = response.header("Retry-After")?.let { raw ->
@@ -415,7 +542,27 @@ class OpenAiCompatibleClient(
                     ?: extractText(node)
             }
             ?.take(200)
+        if (response.code == 400 && sendsImages(request) && detail.looksLikeUnsupportedVision()) {
+            return ProviderHttpException(
+                statusCode = response.code,
+                retryAfterSeconds = retryAfter,
+                providerMessage = detail,
+                friendlyMessage = "当前模型「${request.config.model}」不支持图片输入。" +
+                    "换个支持视觉的模型，或者去掉图片只用文字提问。服务商原话：$detail"
+            )
+        }
         return ProviderHttpException(response.code, retryAfter, detail)
+    }
+
+    /**
+     * 粗判服务商原话是不是「这个模型/网关不收图片」。
+     * 要求同时命中「提到图像」和「表示不支持」两组关键词，
+     * 单独命中任一组都不足以定性（400 的原因太杂，宁可原样透传）。
+     */
+    private fun String?.looksLikeUnsupportedVision(): Boolean {
+        if (this.isNullOrBlank()) return false
+        val text = lowercase()
+        return VISION_SUBJECT_HINTS.any { it in text } && VISION_REFUSAL_HINTS.any { it in text }
     }
 
     private fun parseResponseObject(body: String): JsonObject = try {
@@ -458,5 +605,42 @@ class OpenAiCompatibleClient(
     companion object {
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private const val DEFAULT_CALL_TIMEOUT_MINUTES = 15L
+
+        private val VISION_SUBJECT_HINTS = listOf(
+            "image", "vision", "multi-modal", "multimodal", "picture", "图片", "图像", "视觉", "多模态"
+        )
+        private val VISION_REFUSAL_HINTS = listOf(
+            "does not support", "doesn't support", "not support", "unsupported",
+            "cannot support", "no support", "不支持", "无法支持", "未提供"
+        )
+
+        /**
+         * 单张图片原始字节上限 2 MB，base64 之后约 2.8 MB。
+         *
+         * 数字怎么来的：现代手机原图普遍 3–5 MB，base64 按 4/3 膨胀之后是 4–6.7 MB，
+         * 而 OpenAI 兼容网关的请求体上限普遍落在 4–10 MB 区间。超限时它们几乎
+         * 只回一句 "invalid request"（有的连 message 都没有），用户完全无从判断
+         * 是自己图太大还是 key 有问题。2 MB 编完还剩得下提示词和历史的预算。
+         *
+         * 想放宽请先确认目标网关的请求体上限；真要支持更大的原图，
+         * 正确做法是在调用方（UI 层）先等比缩放，而不是调这个常量。
+         */
+        const val MAX_IMAGE_BYTES = 2L * 1024 * 1024
+
+        /**
+         * 一次请求内所有图片 base64 之后的总字符上限 8 MB（约 6 MB 原图）。
+         * 8 MB 的 JSON 加上提示词仍在主流网关 10 MB 量级之内，留出了余量。
+         *
+         * 单独设总上限是为了堵「每张都刚好卡在 MAX_IMAGE_BYTES」这种绕过单张限制的组合。
+         * 注意它比 3×MAX_IMAGE_BYTES 略小一点（顶格三张的 base64 是 8.4 MB），
+         * 所以多图场景真正的瓶颈是这条线：顶格图最多两张。
+         */
+        const val MAX_TOTAL_BASE64_CHARS = 8L * 1024 * 1024
+
+        /**
+         * 文本类文档内联进提示词的字符上限。文档不走上传，是整段拼进 text 段的，
+         * 没有这道闸的话一份几百 KB 的导出稿能把模型上下文一次吃光。
+         */
+        const val MAX_DOCUMENT_CHARS = 100_000
     }
 }

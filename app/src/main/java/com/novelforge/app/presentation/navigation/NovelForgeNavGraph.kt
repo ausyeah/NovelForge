@@ -166,7 +166,8 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                         apiKeyStore = application.apiKeyStore,
                         client = OpenAiCompatibleClient(),
                         historyStore = application.chatHistoryStore,
-                        llmCallRepository = application.llmCallRepository
+                        llmCallRepository = application.llmCallRepository,
+                        attachmentStore = application.chatAttachmentStore
                     )
                 )
                 chatViewModel.bindProjectScope(entry.arguments?.getString("projectId"))

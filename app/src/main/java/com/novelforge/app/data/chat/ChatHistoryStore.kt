@@ -25,7 +25,14 @@ private const val LEGACY_KEY_NAME = "conversations"
 data class StoredChatMessage(
     val role: String,
     val text: String,
-    val reasoning: String = ""
+    val reasoning: String = "",
+    /**
+     * 附件只存文件路径，字节在 files/chat-attachments/ 下。
+     * 内联 base64 的话，一张 2 MB 的图就是 2.8 MB，40 条消息把 DataStore
+     * 撑到 100 MB —— 而它是在主线程反序列化的，直接 ANR。
+     * 可空 + 默认值：老 JSON 没有这个字段照样解得出来。
+     */
+    val attachments: List<StoredAttachment> = emptyList()
 )
 
 @Serializable

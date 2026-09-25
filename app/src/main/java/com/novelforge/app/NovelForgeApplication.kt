@@ -78,6 +78,7 @@ class NovelForgeApplication : Application(), GenerationWorkerDependenciesProvide
     val wallpaperStore by lazy { WallpaperStore(this) }
     val bookCoverStore by lazy { com.novelforge.app.data.cover.BookCoverStore(this) }
     val chatHistoryStore by lazy { com.novelforge.app.data.chat.ChatHistoryStore(this) }
+    val chatAttachmentStore by lazy { com.novelforge.app.data.chat.ChatAttachmentStore(this) }
     // 必须全局单例：PreferenceDataStoreFactory 每次 create 都会注册一个新 DataStore，
     // 同一文件多个实例并存会直接抛 IllegalStateException（点开书架即闪退的根因）
     val readingPositionStore by lazy { com.novelforge.app.data.settings.ReadingPositionStore(this) }

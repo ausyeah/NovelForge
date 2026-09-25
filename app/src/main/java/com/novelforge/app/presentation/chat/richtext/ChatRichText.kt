@@ -27,6 +27,7 @@ import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalUriHandler
@@ -71,6 +72,16 @@ fun ChatRichText(
     // 按文本 memo：滚动时不重解析，流式刷新时只重解析这一个气泡。
     // 颜色不在这个 AnnotatedString 里（由 Text 的 style 统一给），
     // 所以主题变化不会拿到过期样式。
+    //
+    // 别再拿「key 换成更便宜的东西」来救流式卡顿：前缀字符串每帧都不一样，
+    // 换成 length / hash 之类只会把「重解析」换成「重比较」，一分钱都不省。
+    // 真正已经省下来的是下游 —— `rememberInlineRich` 按 `block.text` 逐块
+    // 缓存，块结构相等就命中（MarkdownBlock 全是 data class）。实测一次
+    // 5054 字 / 54 块的流：每帧只有 1~3 个块发生变化，100 帧合计重算 154 个
+    // 块（整篇重解析的话是 5400 个）。
+    //
+    // 而这里这 0.1~0.3ms 的整篇重解析**不是**卡顿的原因（50ms 帧预算的
+    // 0.6%），尾块行内解析 0.012ms 也是。见 StreamingParseBenchmarkTest。
     val blocks = remember(text) { parseMarkdown(text) }
     if (blocks.isEmpty()) return
 
@@ -106,6 +117,7 @@ private fun MarkdownBlockView(
     block: MarkdownBlock,
     color: Color
 ) {
+    val lineColor = MaterialTheme.colorScheme.outlineVariant
     when (block) {
         is MarkdownBlock.Heading -> {
             val style = when (block.level) {
@@ -126,24 +138,27 @@ private fun MarkdownBlockView(
         is MarkdownBlock.ListBlock -> ListView(block, color)
 
         is MarkdownBlock.Blockquote -> {
-            // 左侧一条竖线 + 内容缩进。嵌套引用会自然画成多条竖线
-            Row(
+            // 左侧一条竖线 + 内容缩进。嵌套引用会自然画成多条竖线。
+            //
+            // 竖线用 drawBehind 画在内容上，**不用** Row + height(IntrinsicSize.Min)
+            // + 竖条 fillMaxHeight 那套：IntrinsicSize 会强制 Compose 对整棵子树
+            // 先跑一遍 intrinsic 测量再跑一遍真实测量，而流式输出时这段引用每帧
+            // 都在长，等于每帧多测一整棵子树。drawBehind 零测量开销，画出来一样。
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(IntrinsicSize.Min)
+                    .drawBehind {
+                        val lineWidth = 3.dp.toPx()
+                        drawRect(
+                            color = lineColor,
+                            topLeft = androidx.compose.ui.geometry.Offset(0f, 0f),
+                            size = androidx.compose.ui.geometry.Size(lineWidth, size.height)
+                        )
+                    }
+                    .padding(start = 13.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Box(
-                    Modifier
-                        .width(3.dp)
-                        .fillMaxHeight()
-                        .background(MaterialTheme.colorScheme.outlineVariant)
-                )
-                Column(
-                    modifier = Modifier.padding(start = 10.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    block.blocks.forEach { MarkdownBlockView(it, color) }
-                }
+                block.blocks.forEach { MarkdownBlockView(it, color) }
             }
         }
 
@@ -481,26 +496,34 @@ private fun TableRow(
     bold: Boolean,
     background: Color
 ) {
-    Row(modifier = Modifier.height(IntrinsicSize.Min)) {
+    Row {
         cells.forEachIndexed { index, cell ->
-            if (index > 0) {
-                Box(
-                    Modifier
-                        .width(1.dp)
-                        .fillMaxHeight()
-                        .background(MaterialTheme.colorScheme.outlineVariant)
-                )
-            }
             TableCell(
                 source = cell,
                 align = aligns.getOrNull(index) ?: ColumnAlign.DEFAULT,
                 color = color,
                 bold = bold,
-                background = background
+                background = background,
+                showDivider = tableCellShowsDivider(index, cells.size)
             )
         }
     }
 }
+
+/**
+ * 这一格要不要在自己右边缘画分隔线。
+ *
+ * 分隔线画在**非末位**单元格的右边缘。写成 `index > 0` 就错了 ——
+ * 那是"非首位"，会在最后一张格子右边多画一条线，表格凭空多个右边框。
+ * 这个条件我第一版正好写反过，所以提成纯函数钉住。
+ *
+ * 以前分隔线是 Row(height(IntrinsicSize.Min)) 里每个非首格**之前**插的一根
+ * fillMaxHeight 细条。为了那根线要对整行多跑一遍 intrinsic 测量，而流式输出时
+ * 表格是一行行长出来的，等于每帧把整张表多测一遍。格子自己知道多高，
+ * 画在它自己身上就够，Row 根本不需要 intrinsic。
+ */
+internal fun tableCellShowsDivider(index: Int, columnCount: Int): Boolean =
+    columnCount > 1 && index >= 0 && index < columnCount - 1
 
 @Composable
 private fun TableCell(
@@ -508,17 +531,31 @@ private fun TableCell(
     align: ColumnAlign,
     color: Color,
     bold: Boolean,
-    background: Color
+    background: Color,
+    showDivider: Boolean
 ) {
     val style = MaterialTheme.typography.bodySmall.copy(
         fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
         textAlign = alignToTextAlign(align)
     )
     val rich = rememberInlineRich(source)
+    val dividerColor = MaterialTheme.colorScheme.outlineVariant
     Box(
         modifier = Modifier
             .widthIn(min = 72.dp)
             .background(background)
+            // 顺序要紧：drawBehind 必须在 background **之后**。
+            // 链上的绘制按顺序由后往前盖，写在前面就等于画在底色底下被盖掉了。
+            // 放在这里刚好压在底色上、文字下（右边有 10dp 内边距，碰不到字）。
+            .drawBehind {
+                if (!showDivider) return@drawBehind
+                val w = 1.dp.toPx()
+                drawRect(
+                    color = dividerColor,
+                    topLeft = androidx.compose.ui.geometry.Offset(size.width - w, 0f),
+                    size = androidx.compose.ui.geometry.Size(w, size.height)
+                )
+            }
             .padding(horizontal = 10.dp, vertical = 6.dp)
     ) {
         if (rich.text.text.isEmpty()) {

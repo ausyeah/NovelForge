@@ -131,9 +131,6 @@ data class UiChatMessage(
 /** 消息 id：每个新气泡一个，copy() 会原样带过去。 */
 private fun newMessageId(): String = "m-${System.nanoTime()}-${(1000..9999).random()}"
 
-/** 流式正文的发布节流：20Hz。低于人眼阅读速度，但把每 token 一次的重组压到 1/20。 */
-private const val PUBLISH_INTERVAL_MS = 50L
-
 private const val INSPIRATION_SYSTEM_PROMPT =
     "你是「小说灵感启发助手」，一位陪伴网文作者的创作顾问。\n" +
         "- 帮作者头脑风暴剧情、人物、世界观与开篇钩子，给点子时一次给出 2-4 个方向不同的方案，突出新颖性和可延展性，避免俗套。\n" +
@@ -164,14 +161,18 @@ class ChatViewModel(
     private val _activeId = MutableStateFlow("")
     val activeId: StateFlow<String> = _activeId.asStateFlow()
 
-    // 冻结策略：视口不在绝对底部（reverseLayout 的 (0,0)）或手指按住时，
-    // 增量照常累积，但发布要等节流窗口/解冻，避免刷新和手势抢锚点。
+    // 冻结策略：视口不在绝对底部（reverseLayout 的 (0,0)）、列表在滚、或手指
+    // 按着时，增量照常攒进 builder，但**一个字都不发**。
+    //
+    // 以前这里只写不读 —— publishStream 只看节流窗口，压根没查 frozen，
+    // 于是"翻上去别动"是句空话：列表在 20Hz 长高，reverseLayout 下最后一条
+    // 变高会把上面所有内容顶走，用户看到的就是"自己没动，页面自己在抽"。
     private var frozen = false
 
     /**
      * 增量只往 builder 里追加，不再每来一个 SSE token 就
      * `m.text + event.text` 复制一遍不断变长的整段正文（那是 O(n²)）。
-     * 20Hz 的发布节流由 publishStream 控制。
+     * 发布节流由 publishStream 按正文长度自适应控制。
      */
     private val streamReasoning = StringBuilder()
     private val streamText = StringBuilder()
@@ -202,13 +203,29 @@ class ChatViewModel(
         publishStream(force = true)
     }
 
+    /**
+     * 无条件把缓冲落进最后一条，**绕过冻结**。
+     *
+     * 只在一个地方用：用户又发新消息、而上一条还冻着的时候。
+     * 不先落账就 resetStreamBuffer 的话，缓冲里那截正文会被直接丢掉 ——
+     * 存档里是完整的（persistCurrent 读缓冲），屏幕上却短一截，
+     * 同一个会话在历史面板和在聊天气泡里长得不一样。
+     */
+    private fun commitStreamBuffer() {
+        if (streamText.isEmpty() && streamReasoning.isEmpty()) return
+        val reasoning = streamReasoning.toString()
+        val text = streamText.toString()
+        lastPublishAt = System.currentTimeMillis()
+        replaceLast { m -> m.copy(reasoning = reasoning, text = text) }
+    }
+
     private fun resetStreamBuffer() {
         streamReasoning.setLength(0)
         streamText.setLength(0)
         lastPublishAt = 0L
     }
 
-    /** 收到增量：先攒进 builder，再按 20Hz 节流发布 */
+    /** 收到增量：先攒进 builder，再按自适应节流发布（见 streamPublishIntervalMs） */
     private fun appendStream(reasoning: String = "", text: String = "") {
         if (reasoning.isNotEmpty()) streamReasoning.append(reasoning)
         if (text.isNotEmpty()) streamText.append(text)
@@ -217,13 +234,21 @@ class ChatViewModel(
 
     /**
      * 把 builder 里的内容拍快照发布到最后一条消息上。
-     * force = true（解冻/流结束/取消/失败）时无视节流立刻落账，
-     * 免得最后几个字卡在窗口里不显示。
+     *
+     * 两道闸，顺序不能反：
+     * 1. **冻结闸**（frozen）—— 用户不在看最新内容时一个字都不发。
+     * 2. **节流闸** —— force = true（解冻）时无视节流立刻落账。
+     *
+     * 冻结闸连 force 也不放行，这是有意的：解冻路径自己会调 flushPending，
+     * 而生成结束时那一次 force 不发也没关系，因为存档已经改成直接读缓冲
+     * （见 currentMessagesForPersistence），不依赖渲染层追上来。
      */
     private fun publishStream(force: Boolean) {
-        val now = System.currentTimeMillis()
-        if (!force && now - lastPublishAt < PUBLISH_INTERVAL_MS) return
         if (streamReasoning.isEmpty() && streamText.isEmpty()) return
+        // 冻结期间一律不发，连 force 也不发（理由见上面的 KDoc）。
+        if (frozen) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastPublishAt < streamPublishIntervalMs(streamText.length)) return
         lastPublishAt = now
         val reasoning = streamReasoning.toString()
         val text = streamText.toString()
@@ -233,7 +258,7 @@ class ChatViewModel(
     /**
      * 只替换最后一条消息对象：前面的实例按引用原样带走，
      * Compose 的 == 短路生效，命中缓存的子树不重组。
-     * 写完的 20Hz 节流让这次 N 元素拷贝的开销可以忽略。
+     * 自适应节流让这次 N 元素拷贝的开销可以忽略。
      */
     private fun replaceLast(transform: (UiChatMessage) -> UiChatMessage) {
         _messages.update { list ->
@@ -298,10 +323,31 @@ class ChatViewModel(
     private fun newConversationId(): String =
         "c-${System.currentTimeMillis()}-${(1000..9999).random()}"
 
+    /**
+     * 要存档的会话内容。
+     *
+     * 关键：最后一条要用 **buffer 里的全文**，不能直接用 `_messages`。
+     * 用户翻到上面去时渲染层是冻结的（publishStream 直接 return），
+     * `_messages` 里的最后一条会比真实内容短一截 —— 拿它存档就是
+     * **静默把一段没写完的回答存进历史**，而且没有任何报错。
+     * 所以存档和渲染必须解耦：渲染可以为了手感冻结，存档永远取全文。
+     */
+    private fun currentMessagesForPersistence(): List<UiChatMessage> {
+        val messages = _messages.value
+        if (streamText.isEmpty() && streamReasoning.isEmpty()) return messages
+        val last = messages.lastOrNull() ?: return messages
+        if (last.role != ChatRole.ASSISTANT) return messages
+        return messages.dropLast(1) + last.copy(
+            text = streamText.toString(),
+            reasoning = streamReasoning.toString()
+        )
+    }
+
     private fun persistCurrent() {
         val id = _activeId.value
         if (id.isEmpty()) return
-        val snapshot = _messages.value.filter { it.text.isNotBlank() || it.reasoning.isNotBlank() }
+        val snapshot = currentMessagesForPersistence()
+            .filter { it.text.isNotBlank() || it.reasoning.isNotBlank() }
         if (snapshot.isEmpty()) return
         val title = snapshot.firstOrNull { it.role == ChatRole.USER }?.text?.trim()?.take(24)
             ?: "新对话"
@@ -379,6 +425,10 @@ class ChatViewModel(
         _attachmentNotice.value = null
         _busy.value = true
         _pendingAttachments.value = emptyList()
+        // 上一条如果还冻着（用户翻上去看了），缓冲里可能还有没发布的正文。
+        // 必须先绕过冻结落账再清缓冲，否则那截正文就此消失 ——
+        // 存档里是全的、气泡里是短的，同一段话两个样子。
+        commitStreamBuffer()
         resetStreamBuffer()
         _messages.update {
             it + UiChatMessage(ChatRole.USER, text, attachments = pending) +
@@ -644,6 +694,25 @@ class ChatViewModel(
  */
 private const val ATTACHMENT_HISTORY_MESSAGES = 4
 
+/**
+ * 发布节流：按正文长度自适应，而不是固定 20Hz。
+ *
+ * 每发布一次，Compose 要给最后一条重排一遍 —— 换行、CJK 断字、整段
+ * MultiParagraph 重建。**解析本身不贵**（实测整篇 5000 字只要 0.1-0.3ms，
+ * 见 StreamingParseBenchmarkTest），真正贵的是排版，而排版开销随正文变长而变大。
+ * 固定 50ms 在长输出上就是每帧重排几千字，模型越快掉得越狠。
+ *
+ * 但也不能一刀切降到 4Hz —— 短回答就该保持跟手。所以给一条随长度增长的
+ * 间隔：几百字以内仍是 50ms（20Hz，跟手），到几千字自动退到 ~210ms（~5Hz），
+ * 一次多吐几十个字，视觉上仍是连续的。
+ *
+ * 250ms 是上限。再慢就明显能看出"一跳一跳"了。
+ */
+internal fun streamPublishIntervalMs(chars: Int): Long = when {
+    chars <= 400 -> 50L
+    else -> (50L + chars / 25L).coerceAtMost(250L)
+}
+
 private fun StoredChatMessage.toUiMessage(): UiChatMessage = UiChatMessage(
     role = if (role == "user") ChatRole.USER else ChatRole.ASSISTANT,
     text = text,
@@ -900,8 +969,11 @@ fun ChatScreen(
             listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
         }
     }
-    LaunchedEffect(atBottom, touching) {
-        viewModel.setFrozen(!atBottom || touching)
+    // 手指抬起来之后 fling 还在继续，那段时间 touching 已经是 false。
+    // 不看 isScrollInProgress 就会在惯性滚动途中解冻，页面当场抽搐一下。
+    val scrolling by remember { derivedStateOf { listState.isScrollInProgress } }
+    LaunchedEffect(atBottom, scrolling, touching) {
+        viewModel.setFrozen(!atBottom || scrolling || touching)
     }
     // 仅在用户发出新消息的瞬间跳到底部（令牌流期间绝不主动滚动）
     val lastRole = messages.lastOrNull()?.role

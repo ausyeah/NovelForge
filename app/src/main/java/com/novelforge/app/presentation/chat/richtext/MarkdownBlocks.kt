@@ -382,11 +382,26 @@ private fun parseBlocks(source: String, depth: Int): List<MarkdownBlock> {
     return out
 }
 
-/** `\r\n` / `\r` 统一成 `\n`；末尾那一个换行不算内容。 */
+/**
+ * `\r\n` / `\r` 统一成 `\n`；末尾那一个换行不算内容。
+ *
+ * 归一化只在真的有 `\r` 时才做。`String.replace` 每次都**新分配**一份整篇
+ * 副本，而流式正文几乎永远是纯 `\n`（SSE 增量是 `\n`，模型也不吐 `\r`），
+ * 所以那两次 replace 就是每帧白拷贝两遍整篇、每帧扔掉两倍于文档大小的
+ * 字符数组。先 `indexOf('\r')` 判一下，比事后靠 GC 便宜得多。
+ */
 private fun splitLines(source: String): List<String> {
-    val normalized = source.replace("\r\n", "\n").replace('\r', '\n')
+    val normalized =
+        if (source.indexOf('\r') < 0) source
+        else source.replace("\r\n", "\n").replace('\r', '\n')
     val lines = normalized.split('\n')
-    return if (lines.isNotEmpty() && lines.last().isEmpty()) lines.dropLast(1) else lines
+    // 末尾那一个换行会切出一个空串，那不是内容。subList 是视图，
+    // 比 dropLast 少拷一份 195 项的列表（每帧都走这里）。
+    return if (lines.isNotEmpty() && lines.last().isEmpty()) {
+        lines.subList(0, lines.size - 1)
+    } else {
+        lines
+    }
 }
 
 private fun parseFencedCode(lines: List<String>, start: Int): Pair<MarkdownBlock.CodeBlock, Int> {

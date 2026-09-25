@@ -69,6 +69,8 @@ fun SettingsScreen(
     apiKeyStore: ApiKeyStore,
     onTestConnection: suspend () -> Result<ConnectionTestResult>,
     onFetchModels: suspend () -> Result<List<String>>,
+    onOpenLedger: () -> Unit,
+    onOpenExports: () -> Unit,
     onBack: () -> Unit
 ) {
     val context = LocalContext.current
@@ -125,7 +127,49 @@ fun SettingsScreen(
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        PaperTopBar(title = "模型设置", subtitle = "密钥只存在这台手机上", onBack = onBack)
+        PaperTopBar(title = "设置", subtitle = "密钥只存在这台手机上", onBack = onBack)
+        // 账本和备份导出以前是首页上的两个平级磁贴，和「模型设置」摆在一起，
+        // 但它们都不是设置项 —— 一个是用量事实，一个是数据搬运。
+        // 收进设置当二级页之后，首页只剩「书架 / 灵感 / 设置」三个一级入口。
+        PaperSurface(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp)
+            ) {
+                TextButton(
+                    onClick = onOpenLedger,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("用量账本")
+                        Text(
+                            "Token 与调用记录",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                TextButton(
+                    onClick = onOpenExports,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("备份与导出")
+                        Text(
+                            "JSON 备份、TXT",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
         Text("外观", style = MaterialTheme.typography.titleSmall)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf("system" to "跟随系统", "light" to "浅色", "dark" to "深色").forEach { (value, label) ->

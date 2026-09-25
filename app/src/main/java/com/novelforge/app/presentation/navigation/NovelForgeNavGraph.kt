@@ -2,24 +2,32 @@ package com.novelforge.app.presentation.navigation
 
 import android.net.Uri
 import android.content.Intent
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.novelforge.app.NovelForgeApplication
+import com.novelforge.app.presentation.chapter.ChapterNeighbor
 import com.novelforge.app.presentation.chapter.ChapterScreen
 import com.novelforge.app.presentation.chat.ChatScreen
 import com.novelforge.app.presentation.chat.ChatViewModel
 import com.novelforge.app.presentation.chapter.ChapterViewModel
+import com.novelforge.app.presentation.common.chapterLabel
 import com.novelforge.app.presentation.exports.ExportsScreen
-import com.novelforge.app.presentation.home.HomeScreen
 import com.novelforge.app.presentation.home.HomeViewModel
 import com.novelforge.app.presentation.library.LibraryScreen
 import com.novelforge.app.presentation.library.LibraryViewModel
@@ -31,7 +39,6 @@ import com.novelforge.app.presentation.project.CreateProjectScreen
 import com.novelforge.app.presentation.project.CreativeSetupScreen
 import com.novelforge.app.presentation.project.CreativeSetupViewModel
 import com.novelforge.app.presentation.project.isCreativeSetupComplete
-import com.novelforge.app.presentation.projects.ProjectsScreen
 import com.novelforge.app.presentation.agent.AgentAssistViewModel
 import com.novelforge.app.presentation.settings.SettingsScreen
 import com.novelforge.app.presentation.story.StoryBibleScreen
@@ -59,404 +66,455 @@ private fun buildExportChapters(
         latestByItem[item.id]?.let { revision ->
             ExportChapter(item.orderIndex, item.title, revision.content)
         }
-    }
+    }.sortedBy { it.orderIndex }
 }
 
 @Composable
 fun NovelForgeApp(application: NovelForgeApplication) {
     val navController = rememberNavController()
+    val backStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = backStackEntry?.destination?.route
+
     val homeViewModel: HomeViewModel = viewModel(
         factory = HomeViewModel.Factory(application.projectRepository)
     )
     val projects by homeViewModel.projects.collectAsStateWithLifecycle()
-    val homeOperationError by homeViewModel.operationError.collectAsStateWithLifecycle()
+
+    // 打开一本书。创作设置没做完先进设置页 —— 那是这本书的必经一步。
     val openProject: (Project) -> Unit = { project ->
         val destination = if (isCreativeSetupComplete(project)) {
-            "outline/${project.id}"
+            Routes.outline(project.id)
         } else {
-            "creative-setup/${project.id}"
+            Routes.creativeSetup(project.id)
         }
         navController.navigate(destination)
     }
 
-    NavHost(navController = navController, startDestination = "home") {
-        composable("home") {
-            HomeScreen(
-                projects = projects,
-                onContinue = openProject,
-                onCreateProject = { navController.navigate("create") },
-                onOpenProjects = { navController.navigate("projects") },
-                onOpenSettings = { navController.navigate("settings") },
-                onOpenExports = { navController.navigate("exports") },
-                onOpenLibrary = { navController.navigate("library") },
-                onOpenChat = { navController.navigate("chat") },
-                onOpenLedger = { navController.navigate("ledger") }
-            )
+    // 一级目的地之间切换用「多返回栈」：每个 tab 保留自己那一摞页面，
+    // 切走再切回来不会退回到首页。之前没有这三个参数，
+    // 从任意页面去另一个页面都得先退回首页，页面上又没有常驻导航告诉用户还有别的地方可去。
+    val onSelectTopLevel: (TopLevelDestination) -> Unit = { destination ->
+        navController.navigate(destination.route) {
+            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+            launchSingleTop = true
+            restoreState = true
         }
-        composable("ledger") {
-            val ledgerViewModel: LedgerViewModel = viewModel(
-                factory = LedgerViewModel.Factory(application.database.llmCallDao())
-            )
-            LedgerScreen(viewModel = ledgerViewModel, onBack = { navController.popBackStack() })
-        }
-        composable("projects") {
-            ProjectsScreen(
-                projects = projects,
-                operationError = homeOperationError,
-                onOpenProject = openProject,
-                onRenameProject = homeViewModel::renameProject,
-                onDeleteProject = homeViewModel::deleteProject,
-                onClearOperationError = homeViewModel::clearOperationError,
-                onCreateProject = { navController.navigate("create") },
-                onBack = { navController.popBackStack() }
-            )
-        }
-        composable("exports") {
-            ExportsScreen(onBack = { navController.popBackStack() })
-        }
-        // 灵感会话按书分桶。route 带 projectId 时绑定到这本书，
-        // 从首页直接进来（不传）就落回全局「灵感」桶 —— 两种都不丢数据。
-        // 这是全 app 唯一一处会把「另一本书的原文」送进模型请求的路径：
-        // 分桶之前，A 书的人设讨论会被整段重发到 B 书的提问里，模型把两本书的人物混成一套。
-        composable(
-            route = "chat?projectId={projectId}",
-            arguments = listOf(
-                navArgument("projectId") { type = NavType.StringType; defaultValue = "" }
-            )
-        ) { entry ->
-            val chatViewModel: ChatViewModel = viewModel(
-                factory = ChatViewModel.Factory(
-                    settingsStore = application.appSettingsStore,
-                    apiKeyStore = application.apiKeyStore,
-                    client = OpenAiCompatibleClient(),
-                    historyStore = application.chatHistoryStore,
-                    llmCallRepository = application.llmCallRepository
+    }
+
+    Scaffold(
+        // 各个页面自己处理 WindowInsets（正文页要避开键盘），
+        // 这里传 0 免得 Scaffold 再垫一层，把布局推上去。
+        contentWindowInsets = WindowInsets(0),
+        bottomBar = {
+            if (showsBottomBar(currentRoute)) {
+                NovelForgeBottomBar(
+                    current = TopLevelDestination.fromRoute(currentRoute)
+                        ?: TopLevelDestination.Books,
+                    onSelect = onSelectTopLevel
                 )
-            )
-            chatViewModel.bindProjectScope(entry.arguments?.getString("projectId"))
-            ChatScreen(viewModel = chatViewModel, onBack = { navController.popBackStack() })
+            }
         }
-        composable("library") {
-            val libraryViewModel: LibraryViewModel = viewModel(
-                factory = LibraryViewModel.Factory(
-                    projectRepository = application.projectRepository,
-                    outlineRepository = application.outlineRepository,
-                    chapterRepository = application.chapterRepository,
-                    generationArtifactRepository = application.generationArtifactRepository,
-                    readingPositionStore = application.readingPositionStore
+    ) { padding ->
+        NavHost(
+            navController = navController,
+            startDestination = Routes.BOOKS,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding)
+        ) {
+            // ————————————————————————————————————————————
+            // 一级：书架
+            // 这里是全 app 唯一的书籍列表。以前有「全部项目」和「书架」两个门
+            // 指向同一份 List<Project>，而两者互不相通 —— 书架里没有任何
+            // navigate() 调用，于是从书架进了一本书就再也回不来，也永远进不去写作界面。
+            // 现在一本书只有一个入口：点封面 = 继续写（写作是这个 app 的主动作），
+            // 阅读变成这本书自己的次要动作。
+            // ————————————————————————————————————————————
+            composable(Routes.BOOKS) {
+                val libraryViewModel: LibraryViewModel = viewModel(
+                    factory = LibraryViewModel.Factory(
+                        projectRepository = application.projectRepository,
+                        outlineRepository = application.outlineRepository,
+                        chapterRepository = application.chapterRepository,
+                        generationArtifactRepository = application.generationArtifactRepository,
+                        readingPositionStore = application.readingPositionStore
+                    )
                 )
-            )
-            LibraryScreen(viewModel = libraryViewModel, onBack = { navController.popBackStack() })
-        }
-        composable("create") {
-            CreateProjectScreen(
-                onCreate = { title ->
-                    homeViewModel.createProject(title) { project ->
-                        navController.navigate("creative-setup/${project.id}") {
-                            popUpTo("create") { inclusive = true }
-                        }
-                    }
-                },
-                onCancel = { navController.popBackStack() }
-            )
-        }
-        composable(
-            route = "creative-setup/{projectId}",
-            arguments = listOf(navArgument("projectId") { type = NavType.StringType })
-        ) { entry ->
-            val projectId = requireNotNull(entry.arguments?.getString("projectId"))
-            val viewModel: CreativeSetupViewModel = viewModel(
-                key = "creative-setup-$projectId",
-                factory = CreativeSetupViewModel.Factory(
-                    projectId = projectId,
-                    repository = application.projectRepository
-                )
-            )
-            val project by viewModel.project.collectAsStateWithLifecycle()
-            val error by viewModel.error.collectAsStateWithLifecycle()
-            val saving by viewModel.saving.collectAsStateWithLifecycle()
-            when {
-                project != null -> CreativeSetupScreen(
-                    project = project!!,
-                    saving = saving,
-                    error = error,
-                    onSave = { config, questData ->
-                        viewModel.save(config, questData) {
-                            navController.navigate("outline/$projectId") {
-                                popUpTo("creative-setup/$projectId") { inclusive = true }
-                            }
-                        }
-                    },
-                    onSaveAndAutoRun = { config, questData ->
-                        viewModel.save(config, questData) {
-                            navController.navigate("outline/$projectId?autostart=true") {
-                                popUpTo("creative-setup/$projectId") { inclusive = true }
-                            }
-                        }
-                    },
-                    onClearError = viewModel::clearError,
+                LibraryScreen(
+                    viewModel = libraryViewModel,
+                    onContinueWriting = openProject,
+                    onOpenCreate = { navController.navigate(Routes.CREATE) },
                     onBack = { navController.popBackStack() }
                 )
-                error != null -> com.novelforge.app.presentation.common.PaperMessage(
-                    text = "项目没有打开",
-                    detail = error
-                )
-                else -> com.novelforge.app.presentation.common.PaperMessage(text = "正在加载项目…")
             }
-        }
-        composable("settings") {
-            SettingsScreen(
-                settingsStore = application.appSettingsStore,
-                presetStore = application.modelPresetStore,
-                wallpaperStore = application.wallpaperStore,
-                apiKeyStore = application.apiKeyStore,
-                onTestConnection = { application.generationRuntime.testConnection() },
-                onFetchModels = { runCatching { application.generationRuntime.fetchModels() } },
-                onBack = { navController.popBackStack() }
-            )
-        }
-        composable(
-            route = "outline/{projectId}?autostart={autostart}",
-            arguments = listOf(
-                navArgument("projectId") { type = NavType.StringType },
-                navArgument("autostart") { type = NavType.BoolType; defaultValue = false }
-            )
-        ) { entry ->
-            val projectId = requireNotNull(entry.arguments?.getString("projectId"))
-            val autostart = entry.arguments?.getBoolean("autostart") == true
-            val title = projects.firstOrNull { it.id == projectId }?.title.orEmpty()
-            val viewModel: OutlineViewModel = viewModel(
-                key = "outline-$projectId",
-                factory = OutlineViewModel.Factory(
-                    projectId = projectId,
-                    projectRepository = application.projectRepository,
-                    outlineRepository = application.outlineRepository,
-                    chapterRepository = application.chapterRepository,
-                    generationRepository = application.generationRepository,
-                    generationArtifactRepository = application.generationArtifactRepository,
-                    generationRuntime = application.generationRuntime
+
+            // ————————————————————————————————————————————
+            // 一级：灵感
+            // 带 projectId 时会话按这本书分桶，不带就落回全局「灵感」桶。
+            // 分桶之前，A 书的人设讨论会被整段重发进 B 书的请求里。
+            // ————————————————————————————————————————————
+            composable(
+                route = "${Routes.CHAT}?projectId={projectId}",
+                arguments = listOf(
+                    navArgument("projectId") { type = NavType.StringType; defaultValue = "" }
                 )
-            )
-            val outlineVersion by viewModel.outline.collectAsStateWithLifecycle()
-            val job by viewModel.activeJob.collectAsStateWithLifecycle()
-            val error by viewModel.error.collectAsStateWithLifecycle()
-            val autoRun by viewModel.autoRun.collectAsStateWithLifecycle()
-            val chapterJob by viewModel.chapterJob.collectAsStateWithLifecycle()
-            val writtenChapterIds by viewModel.writtenChapterIds.collectAsStateWithLifecycle()
-            val optimizingIndex by viewModel.optimizingIndex.collectAsStateWithLifecycle()
-            val wandResult by viewModel.wandResult.collectAsStateWithLifecycle()
-            val agentViewModel: AgentAssistViewModel = viewModel(
-                key = "agent-$projectId",
-                factory = AgentAssistViewModel.Factory(
-                    projectId = projectId,
-                    bookQuestion = application.bookQuestion,
-                    traceStore = application.agentTraceStore
-                )
-            )
-            val agentSteps by agentViewModel.steps.collectAsStateWithLifecycle()
-            val agentBusy by agentViewModel.busy.collectAsStateWithLifecycle()
-            val agentError by agentViewModel.error.collectAsStateWithLifecycle()
-            androidx.compose.runtime.LaunchedEffect(autostart, projectId) {
-                // 进大纲页顺手收一次僵尸任务（幂等、廉价查询），长时间驻留的进程也能自愈
-                runCatching { application.generationRuntime.sweepZombieJobs() }
-                if (autostart) viewModel.startAutoRun()
-            }
-            OutlineScreen(
-                projectTitle = title,
-                outline = outlineVersion,
-                job = job,
-                chapterJob = chapterJob,
-                writtenChapterIds = writtenChapterIds,
-                plannedChapterCount = projects.firstOrNull { it.id == projectId }
-                    ?.creativeConfig?.chapterCount,
-                error = error,
-                autoRun = autoRun,
-                onToggleAutoRun = viewModel::setAutoRun,
-                onStartAutoRun = viewModel::startAutoRun,
-                onGenerate = viewModel::generate,
-                onCancel = viewModel::cancel,
-                onSave = viewModel::saveEditedItems,
-                onSaveRaw = viewModel::saveRawOutline,
-                onOpenChapter = { item ->
-                    navController.navigate("chapter/$projectId/${Uri.encode(item.id)}")
-                },
-                onClearError = viewModel::clearError,
-                optimizingIndex = optimizingIndex,
-                wandResult = wandResult,
-                onOptimize = viewModel::optimizeChapter,
-                onStopOptimize = viewModel::stopOptimize,
-                onConsumeWand = viewModel::consumeWandResult,
-                onRegenerateFrom = viewModel::regenerateFrom,
-                onOpenMemory = { navController.navigate("memory/$projectId") },
-                agentSteps = agentSteps,
-                agentBusy = agentBusy,
-                agentError = agentError,
-                onAskAgent = agentViewModel::ask
-            )
-        }
-        composable(
-            route = "memory/{projectId}",
-            arguments = listOf(navArgument("projectId") { type = NavType.StringType })
-        ) { entry ->
-            val projectId = requireNotNull(entry.arguments?.getString("projectId"))
-            val bibleViewModel: StoryBibleViewModel = viewModel(
-                key = "memory-$projectId",
-                factory = StoryBibleViewModel.Factory(projectId, application.projectRepository)
-            )
-            StoryBibleScreen(
-                viewModel = bibleViewModel,
-                onBack = { navController.popBackStack() }
-            )
-        }
-        composable(
-            route = "chapter/{projectId}/{outlineItemId}?autostart={autostart}",
-            arguments = listOf(
-                navArgument("projectId") { type = NavType.StringType },
-                navArgument("outlineItemId") { type = NavType.StringType },
-                navArgument("autostart") { type = NavType.BoolType; defaultValue = false }
-            )
-        ) { entry ->
-            val projectId = requireNotNull(entry.arguments?.getString("projectId"))
-            val outlineItemId = requireNotNull(entry.arguments?.getString("outlineItemId"))
-            val autostart = entry.arguments?.getBoolean("autostart") == true
-            val title = projects.firstOrNull { it.id == projectId }?.title.orEmpty()
-            val viewModel: ChapterViewModel = viewModel(
-                key = "chapter-$projectId-$outlineItemId",
-                factory = ChapterViewModel.Factory(
-                    projectId = projectId,
-                    targetId = outlineItemId,
-                    projectRepository = application.projectRepository,
-                    outlineRepository = application.outlineRepository,
-                    chapterRepository = application.chapterRepository,
-                    generationRepository = application.generationRepository,
-                    generationRuntime = application.generationRuntime
-                )
-            )
-            val outlines by viewModel.outlines.collectAsStateWithLifecycle()
-            val revisions by viewModel.revisions.collectAsStateWithLifecycle()
-            val job by viewModel.activeJob.collectAsStateWithLifecycle()
-            val error by viewModel.error.collectAsStateWithLifecycle()
-            val book by viewModel.project.collectAsStateWithLifecycle()
-            val excludedCharacters by viewModel.excludedCharacters.collectAsStateWithLifecycle()
-            val excludedThreads by viewModel.excludedThreads.collectAsStateWithLifecycle()
-            val chapter = outlines.firstOrNull()?.chapters?.firstOrNull { it.id == outlineItemId }
-            // 必须 remember：select 内部要把全部已确认事实排序打分，
-            // 而 continuityState 每写一章就整块换新，不缓存的话每次重组都重算一遍。
-            val continuity = book?.continuityState
-            val inputBudget = book?.creativeConfig?.inputBudget ?: 8_000
-            val chapterHint = chapter?.let { item ->
-                chapterMemoryHint(item.title, item.summary, item.characterChanges)
-            }.orEmpty()
-            val memory = remember(continuity, excludedCharacters, excludedThreads, inputBudget, chapterHint) {
-                continuity?.let {
-                    MemorySelector.select(
-                        it,
-                        excludedCharacterIds = excludedCharacters,
-                        excludedThreads = excludedThreads,
-                        inputBudget = inputBudget,
-                        chapterHint = chapterHint
+            ) { entry ->
+                val chatViewModel: ChatViewModel = viewModel(
+                    factory = ChatViewModel.Factory(
+                        settingsStore = application.appSettingsStore,
+                        apiKeyStore = application.apiKeyStore,
+                        client = OpenAiCompatibleClient(),
+                        historyStore = application.chatHistoryStore,
+                        llmCallRepository = application.llmCallRepository
                     )
-                }
+                )
+                chatViewModel.bindProjectScope(entry.arguments?.getString("projectId"))
+                ChatScreen(viewModel = chatViewModel, onBack = { navController.popBackStack() })
             }
-            // 留洞后 orderIndex 不连续：取"序号更大的下一章"而不是 +1 精确匹配
-            val nextChapter = outlines.firstOrNull()?.chapters
-                ?.sortedBy { it.orderIndex }
-                ?.firstOrNull { it.orderIndex > (chapter?.orderIndex ?: Int.MAX_VALUE) }
-            val hasRevision = revisions.any { it.outlineItemId == outlineItemId }
-            val exportScope = rememberCoroutineScope()
-            androidx.compose.runtime.LaunchedEffect(autostart, chapter?.id, job?.id, hasRevision) {
-                if (autostart && chapter != null && job == null && !hasRevision) {
-                    viewModel.generate(chapter)
-                }
+
+            // ————————————————————————————————————————————
+            // 一级：设置（它是一个 hub，不是设置列表本身）
+            // 模型连接、外观、壁纸在这一页；账本和备份导出是它的二级页。
+            // ————————————————————————————————————————————
+            composable(Routes.SETTINGS) {
+                SettingsScreen(
+                    settingsStore = application.appSettingsStore,
+                    presetStore = application.modelPresetStore,
+                    wallpaperStore = application.wallpaperStore,
+                    apiKeyStore = application.apiKeyStore,
+                    onTestConnection = { application.generationRuntime.testConnection() },
+                    onFetchModels = { runCatching { application.generationRuntime.fetchModels() } },
+                    onOpenLedger = { navController.navigate(Routes.LEDGER) },
+                    onOpenExports = { navController.navigate(Routes.EXPORTS) },
+                    onBack = { navController.popBackStack() }
+                )
             }
-            ChapterScreen(
-                projectTitle = title,
-                chapter = chapter,
-                revision = chapter?.let(viewModel::revisionFor),
-                job = job,
-                error = error,
-                onGenerate = viewModel::generate,
-                onCancel = viewModel::cancel,
-                onRetry = viewModel::generate,
-                onNextChapter = nextChapter?.let { item ->
-                    {
-                        // 替换式导航：新章替换栈里的当前章，保证“返回大纲”一步到位
-                        navController.navigate("chapter/$projectId/${Uri.encode(item.id)}?autostart=true") {
-                            popUpTo("chapter/$projectId/${Uri.encode(outlineItemId)}") { inclusive = true }
-                        }
-                    }
-                },
-                onBackHome = { navController.popBackStack("home", false) },
-                onExport = {
-                    val outlineChapters = outlines.firstOrNull()?.chapters.orEmpty()
-                    val revisionList = revisions
-                    exportScope.launch {
-                        val result = withContext(Dispatchers.IO) {
-                            runCatching {
-                                val chapters = buildExportChapters(outlineChapters, revisionList)
-                                if (chapters.isEmpty()) null
-                                else TxtExporter().saveToPublicDownloads(application, title, chapters)
+
+            composable(Routes.LEDGER) {
+                val ledgerViewModel: LedgerViewModel = viewModel(
+                    factory = LedgerViewModel.Factory(application.database.llmCallDao())
+                )
+                LedgerScreen(viewModel = ledgerViewModel, onBack = { navController.popBackStack() })
+            }
+
+            composable(Routes.EXPORTS) {
+                ExportsScreen(onBack = { navController.popBackStack() })
+            }
+
+            composable(Routes.CREATE) {
+                CreateProjectScreen(
+                    onCreate = { title ->
+                        homeViewModel.createProject(title) { project ->
+                            navController.navigate(Routes.creativeSetup(project.id)) {
+                                popUpTo(Routes.CREATE) { inclusive = true }
                             }
                         }
-                        result.onSuccess { saved ->
-                            if (saved != null) {
+                    },
+                    onCancel = { navController.popBackStack() }
+                )
+            }
+
+            // ————————————————————————————————————————————
+            // 书内
+            // ————————————————————————————————————————————
+            composable(
+                route = Routes.CREATIVE_SETUP,
+                arguments = listOf(navArgument("projectId") { type = NavType.StringType })
+            ) { entry ->
+                val projectId = requireNotNull(entry.arguments?.getString("projectId"))
+                val viewModel: CreativeSetupViewModel = viewModel(
+                    key = "creative-setup-$projectId",
+                    factory = CreativeSetupViewModel.Factory(
+                        projectId = projectId,
+                        repository = application.projectRepository
+                    )
+                )
+                val project by viewModel.project.collectAsStateWithLifecycle()
+                val error by viewModel.error.collectAsStateWithLifecycle()
+                val saving by viewModel.saving.collectAsStateWithLifecycle()
+                when {
+                    project != null -> CreativeSetupScreen(
+                        project = project!!,
+                        saving = saving,
+                        error = error,
+                        onSave = { config, questData ->
+                            viewModel.save(config, questData) {
+                                navController.navigate(Routes.outline(projectId)) {
+                                    popUpTo(Routes.creativeSetup(projectId)) { inclusive = true }
+                                }
+                            }
+                        },
+                        onSaveAndAutoRun = { config, questData ->
+                            viewModel.save(config, questData) {
+                                navController.navigate(Routes.outlineAuto(projectId)) {
+                                    popUpTo(Routes.creativeSetup(projectId)) { inclusive = true }
+                                }
+                            }
+                        },
+                        onClearError = viewModel::clearError,
+                        onBack = { navController.popBackStack() }
+                    )
+                    error != null -> com.novelforge.app.presentation.common.PaperMessage(
+                        text = "项目没有打开",
+                        detail = error
+                    )
+                    else -> com.novelforge.app.presentation.common.PaperMessage(text = "正在加载项目…")
+                }
+            }
+
+            // 书的 hub。改过之后它有返回键了 —— 以前这里是全 app 唯一一个
+            // 没有返回按钮的页面，恰恰也是用户停留最久、且未保存编辑会被静默
+            // 销毁的那个页面。编辑缓冲已经搬进 ViewModel，退出还有未保存确认。
+            composable(
+                route = "${Routes.OUTLINE}?autostart={autostart}",
+                arguments = listOf(
+                    navArgument("projectId") { type = NavType.StringType },
+                    navArgument("autostart") { type = NavType.BoolType; defaultValue = false }
+                )
+            ) { entry ->
+                val projectId = requireNotNull(entry.arguments?.getString("projectId"))
+                val autostart = entry.arguments?.getBoolean("autostart") == true
+                val title = projects.firstOrNull { it.id == projectId }?.title.orEmpty()
+                val viewModel: OutlineViewModel = viewModel(
+                    key = "outline-$projectId",
+                    factory = OutlineViewModel.Factory(
+                        projectId = projectId,
+                        projectRepository = application.projectRepository,
+                        outlineRepository = application.outlineRepository,
+                        chapterRepository = application.chapterRepository,
+                        generationRepository = application.generationRepository,
+                        generationArtifactRepository = application.generationArtifactRepository,
+                        generationRuntime = application.generationRuntime
+                    )
+                )
+                val agentViewModel: AgentAssistViewModel = viewModel(
+                    key = "agent-$projectId",
+                    factory = AgentAssistViewModel.Factory(
+                        projectId = projectId,
+                        bookQuestion = application.bookQuestion,
+                        traceStore = application.agentTraceStore
+                    )
+                )
+                val agentSteps by agentViewModel.steps.collectAsStateWithLifecycle()
+                val agentBusy by agentViewModel.busy.collectAsStateWithLifecycle()
+                val agentError by agentViewModel.error.collectAsStateWithLifecycle()
+                androidx.compose.runtime.LaunchedEffect(autostart, projectId) {
+                    // 进书页顺手收一次僵尸任务（幂等、廉价查询），长时间驻留的进程也能自愈
+                    runCatching { application.generationRuntime.sweepZombieJobs() }
+                    if (autostart) viewModel.startAutoRun()
+                }
+                OutlineScreen(
+                    viewModel = viewModel,
+                    projectTitle = title,
+                    onBack = { navController.popBackStack() },
+                    onOpenChapter = { item ->
+                        navController.navigate(Routes.chapter(projectId, item.id))
+                    },
+                    onOpenMemory = { navController.navigate(Routes.memory(projectId)) },
+                    agentSteps = agentSteps,
+                    agentBusy = agentBusy,
+                    agentError = agentError,
+                    onAskAgent = agentViewModel::ask,
+                    onOpenChat = {
+                        navController.navigate(Routes.chat(projectId)) {
+                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    }
+                )
+            }
+
+            composable(
+                route = Routes.MEMORY,
+                arguments = listOf(navArgument("projectId") { type = NavType.StringType })
+            ) { entry ->
+                val projectId = requireNotNull(entry.arguments?.getString("projectId"))
+                val bibleViewModel: StoryBibleViewModel = viewModel(
+                    key = "memory-$projectId",
+                    factory = StoryBibleViewModel.Factory(projectId, application.projectRepository)
+                )
+                StoryBibleScreen(
+                    viewModel = bibleViewModel,
+                    onBack = { navController.popBackStack() }
+                )
+            }
+
+            composable(
+                route = "${Routes.CHAPTER}?autostart={autostart}",
+                arguments = listOf(
+                    navArgument("projectId") { type = NavType.StringType },
+                    navArgument("outlineItemId") { type = NavType.StringType },
+                    navArgument("autostart") { type = NavType.BoolType; defaultValue = false }
+                )
+            ) { entry ->
+                val projectId = requireNotNull(entry.arguments?.getString("projectId"))
+                val outlineItemId = requireNotNull(entry.arguments?.getString("outlineItemId"))
+                val autostart = entry.arguments?.getBoolean("autostart") == true
+                val title = projects.firstOrNull { it.id == projectId }?.title.orEmpty()
+                val viewModel: ChapterViewModel = viewModel(
+                    key = "chapter-$projectId-$outlineItemId",
+                    factory = ChapterViewModel.Factory(
+                        projectId = projectId,
+                        targetId = outlineItemId,
+                        projectRepository = application.projectRepository,
+                        outlineRepository = application.outlineRepository,
+                        chapterRepository = application.chapterRepository,
+                        generationRepository = application.generationRepository,
+                        generationRuntime = application.generationRuntime
+                    )
+                )
+                val outlines by viewModel.outlines.collectAsStateWithLifecycle()
+                val revisions by viewModel.revisions.collectAsStateWithLifecycle()
+                val job by viewModel.activeJob.collectAsStateWithLifecycle()
+                val error by viewModel.error.collectAsStateWithLifecycle()
+                val book by viewModel.project.collectAsStateWithLifecycle()
+                val excludedCharacters by viewModel.excludedCharacters.collectAsStateWithLifecycle()
+                val excludedThreads by viewModel.excludedThreads.collectAsStateWithLifecycle()
+                val chapter = outlines.firstOrNull()?.chapters?.firstOrNull { it.id == outlineItemId }
+                // 必须 remember：select 内部要把全部已确认事实排序打分，
+                // 而 continuityState 每写一章就整块换新，不缓存的话每次重组都重算一遍。
+                val continuity = book?.continuityState
+                val inputBudget = book?.creativeConfig?.inputBudget ?: 8_000
+                val chapterHint = chapter?.let { item ->
+                    chapterMemoryHint(item.title, item.summary, item.characterChanges)
+                }.orEmpty()
+                val memory = remember(continuity, excludedCharacters, excludedThreads, inputBudget, chapterHint) {
+                    continuity?.let {
+                        MemorySelector.select(
+                            it,
+                            excludedCharacterIds = excludedCharacters,
+                            excludedThreads = excludedThreads,
+                            inputBudget = inputBudget,
+                            chapterHint = chapterHint
+                        )
+                    }
+                }
+                val hasRevision = revisions.any { it.outlineItemId == outlineItemId }
+                val exportScope = rememberCoroutineScope()
+                androidx.compose.runtime.LaunchedEffect(autostart, chapter?.id, job?.id, hasRevision) {
+                    if (autostart && chapter != null && job == null && !hasRevision) {
+                        viewModel.generate(chapter)
+                    }
+                }
+                ChapterScreen(
+                    projectTitle = title,
+                    chapter = chapter,
+                    revision = chapter?.let(viewModel::revisionFor),
+                    job = job,
+                    error = error,
+                    onGenerate = viewModel::generate,
+                    onCancel = viewModel::cancel,
+                    onRetry = viewModel::generate,
+                    onExport = {
+                        val outlineChapters = outlines.firstOrNull()?.chapters.orEmpty()
+                        val revisionList = revisions
+                        exportScope.launch {
+                            val result = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    val chapters = buildExportChapters(outlineChapters, revisionList)
+                                    if (chapters.isEmpty()) null
+                                    else TxtExporter().saveToPublicDownloads(application, title, chapters)
+                                }
+                            }
+                            result.onSuccess { saved ->
+                                if (saved != null) {
+                                    android.widget.Toast.makeText(
+                                        application,
+                                        "已保存到 ${saved.location}/${saved.displayName}",
+                                        android.widget.Toast.LENGTH_LONG
+                                    ).show()
+                                }
+                            }.onFailure { error ->
                                 android.widget.Toast.makeText(
                                     application,
-                                    "已保存到 ${saved.location}/${saved.displayName}",
+                                    "保存失败：${error.message ?: "未知错误"}",
                                     android.widget.Toast.LENGTH_LONG
                                 ).show()
                             }
-                        }.onFailure { error ->
-                            android.widget.Toast.makeText(
-                                application,
-                                "保存失败：${error.message ?: "未知错误"}",
-                                android.widget.Toast.LENGTH_LONG
-                            ).show()
                         }
-                    }
-                },
-                onShare = {
-                    val outlineChapters = outlines.firstOrNull()?.chapters.orEmpty()
-                    val revisionList = revisions
-                    exportScope.launch {
-                        val file = withContext(Dispatchers.IO) {
-                            val chapters = buildExportChapters(outlineChapters, revisionList)
-                            if (chapters.isEmpty()) null
-                            else TxtExporter().writeToCache(application, title, chapters)
-                        }
-                        if (file != null) {
-                            val send = Intent(Intent.ACTION_SEND).apply {
-                                type = "text/plain"
-                                putExtra(Intent.EXTRA_STREAM, TxtExporter().shareUri(application, file))
-                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    },
+                    onShare = {
+                        val outlineChapters = outlines.firstOrNull()?.chapters.orEmpty()
+                        val revisionList = revisions
+                        exportScope.launch {
+                            val file = withContext(Dispatchers.IO) {
+                                val chapters = buildExportChapters(outlineChapters, revisionList)
+                                if (chapters.isEmpty()) null
+                                else TxtExporter().writeToCache(application, title, chapters)
                             }
-                            application.startActivity(
-                                Intent.createChooser(send, "分享小说 TXT")
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            )
+                            if (file != null) {
+                                val send = Intent(Intent.ACTION_SEND).apply {
+                                    type = "text/plain"
+                                    putExtra(Intent.EXTRA_STREAM, TxtExporter().shareUri(application, file))
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                application.startActivity(
+                                    Intent.createChooser(send, "分享小说 TXT")
+                                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            }
                         }
-                    }
-                },
-                onClearError = viewModel::clearError,
-                onBack = { navController.popBackStack() },
-                memoryCharacters = book?.continuityState?.characters.orEmpty()
-                    .filter { it.name.isNotBlank() }
-                    .map { it.id to it.name },
-                excludedCharacterIds = excludedCharacters,
-                memoryThreads = book?.continuityState?.unresolvedThreads.orEmpty().filter { it.isNotBlank() },
-                excludedThreads = excludedThreads,
-                factCount = memory?.factCount ?: 0,
-                omittedCharacters = memory?.omittedCharacters ?: 0,
-                omittedThreads = memory?.omittedThreads ?: 0,
-                omittedRules = memory?.omittedRules ?: 0,
-                pendingCount = book?.continuityState?.pendingFacts?.size ?: 0,
-                onToggleCharacter = viewModel::toggleCharacter,
-                onToggleThread = viewModel::toggleThread,
-                onOpenMemory = { navController.navigate("memory/$projectId") },
-                previousRevision = chapter?.let(viewModel::previousRevisionFor),
-                onRestorePrevious = { chapter?.let(viewModel::restorePrevious) }
-            )
+                    },
+                    // 「回到这本书」而不是「回到 App 首页」。以前这一下把大纲和正文
+                    // 两层一起弹掉，而且重新进来永远落在大纲页 —— 书里读到第几章
+                    // 这个信息在写作侧从来没有被记下来过。
+                    onBackToBook = {
+                        navController.navigate(Routes.outline(projectId)) {
+                            popUpTo(Routes.OUTLINE) { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    },
+                    onClearError = viewModel::clearError,
+                    onBack = { navController.popBackStack() },
+                    previousChapter = viewModel.previousChapterFor(chapter)?.let { item ->
+                        ChapterNeighbor(
+                            label = chapterLabel(item.orderIndex),
+                            hasRevision = viewModel.hasRevisionFor(item),
+                            // 往回走不要带 autostart：目标章可能已经有正文，
+                            // 带了也只会什么都不做。
+                            onOpen = { navController.navigate(Routes.chapter(projectId, item.id)) }
+                        )
+                    },
+                    nextChapter = viewModel.nextChapterFor(chapter)?.let { item ->
+                        ChapterNeighbor(
+                            label = chapterLabel(item.orderIndex),
+                            hasRevision = viewModel.hasRevisionFor(item),
+                            onOpen = {
+                                // 替换式导航：新章替换栈里的当前章，返回一步到大纲。
+                                // saveState/restoreState 是必须的：SavedStateHandle 跟着
+                                // NavBackStackEntry 一起死，而这一跳会把当前这条弹掉，
+                                // 不存就等于「排除掉的角色」又被悄悄放回去。
+                                navController.navigate(Routes.chapterAuto(projectId, item.id)) {
+                                    popUpTo(Routes.chapter(projectId, outlineItemId)) {
+                                        inclusive = true
+                                        saveState = true
+                                    }
+                                    restoreState = true
+                                    launchSingleTop = true
+                                }
+                            }
+                        )
+                    },
+                    memoryCharacters = book?.continuityState?.characters.orEmpty()
+                        .filter { it.name.isNotBlank() }
+                        .map { it.id to it.name },
+                    excludedCharacterIds = excludedCharacters,
+                    memoryThreads = book?.continuityState?.unresolvedThreads.orEmpty().filter { it.isNotBlank() },
+                    excludedThreads = excludedThreads,
+                    factCount = memory?.factCount ?: 0,
+                    omittedCharacters = memory?.omittedCharacters ?: 0,
+                    omittedThreads = memory?.omittedThreads ?: 0,
+                    omittedRules = memory?.omittedRules ?: 0,
+                    pendingCount = book?.continuityState?.pendingFacts?.size ?: 0,
+                    onToggleCharacter = viewModel::toggleCharacter,
+                    onToggleThread = viewModel::toggleThread,
+                    onOpenMemory = { navController.navigate(Routes.memory(projectId)) },
+                    previousRevision = chapter?.let(viewModel::previousRevisionFor),
+                    onRestorePrevious = { chapter?.let(viewModel::restorePrevious) }
+                )
+            }
         }
     }
 }

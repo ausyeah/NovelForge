@@ -30,6 +30,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -144,8 +145,12 @@ fun ExportsScreen(onBack: () -> Unit) {
         .collectAsStateWithLifecycle(initialValue = emptyList())
     var pickBackupProject by remember { mutableStateOf(false) }
     var backupMessage by remember { mutableStateOf<String?>(null) }
-    // SAF 选择期间 Activity 可能被回收，remember 会丢：挂到进程级对象上
-    var pendingBackupProjectId by BackupPendingStore::projectId
+    // SAF 选择期间 Activity 可能被回收，所以要存住「导出哪本书」。
+    // 用 rememberSaveable 存 id，而不是进程级单槽：
+    // 单槽无 key、不清理，SAF 期间再触发一次导出就会写进同一个槽，
+    // 于是「A 书的文件名 + B 书的内容」。而且它是整进程唯一一份，
+    // 书架页刚修掉的就是同一个模式。
+    var pendingBackupProjectId by rememberSaveable { mutableStateOf<String?>(null) }
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/json")
     ) { uri: Uri? ->
@@ -323,10 +328,6 @@ fun ExportsScreen(onBack: () -> Unit) {
             }
         }
     }
-}
-
-private object BackupPendingStore {
-    var projectId: String? = null
 }
 
 private fun formatSize(bytes: Long): String = when {

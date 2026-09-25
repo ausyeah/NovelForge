@@ -27,11 +27,11 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -45,7 +45,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -59,8 +58,12 @@ import com.novelforge.app.domain.repository.ChapterRepository
 import com.novelforge.app.domain.repository.OutlineRepository
 import com.novelforge.app.domain.repository.ProjectRepository
 import com.novelforge.app.presentation.common.PaperTopBar
+import com.novelforge.app.presentation.common.StatusChip
 import com.novelforge.app.presentation.common.chapterLabel
 import com.novelforge.app.presentation.common.cleanChapterTitle
+import com.novelforge.app.presentation.common.formatUpdatedAgo
+import com.novelforge.app.ui.theme.PaperButton
+import com.novelforge.app.ui.theme.PaperSurface
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -96,9 +99,33 @@ class LibraryViewModel(
     private val _novel = MutableStateFlow<LibraryNovel?>(null)
     val novel: StateFlow<LibraryNovel?> = _novel.asStateFlow()
 
+    private val _lastReadIndex = MutableStateFlow<Map<String, Int>>(emptyMap())
+
+    /**
+     * 书架顶部「继续读」的燃料：projectId -> 上次读到的 orderIndex。
+     * 刻意只缓存 Int：正文不进这里，所以这张表进 Bundle 也不会炸。
+     * LibraryNovel 里的 lastReadOrderIndex 只在「书已打开」时才有值，
+     * 而书架没打开书时也要知道该显示续读入口，所以另存一份。
+     */
+    val lastReadIndex: StateFlow<Map<String, Int>> = _lastReadIndex.asStateFlow()
+
+    /** 书架停留期间按需拉一次阅读位置（DataStore 没有 Flow 可订阅） */
+    fun refreshLastRead(projectId: String) {
+        viewModelScope.launch {
+            val index = readingPositionStore.lastRead(projectId) ?: return@launch
+            _lastReadIndex.update { it + (projectId to index) }
+        }
+    }
+
     fun open(project: Project) {
         viewModelScope.launch {
-            _novel.value = buildNovel(project.id, project.title, project.status.label())
+            val built = buildNovel(project.id, project.title, project.status.label())
+            _novel.value = built
+            // 顺带把阅读位置补进书架那张表：顶部「继续读」不该只在
+            // refreshLastRead 恰好跑过的那本书上才亮
+            built.lastReadOrderIndex?.let { index ->
+                _lastReadIndex.update { it + (project.id to index) }
+            }
         }
     }
 
@@ -125,6 +152,8 @@ class LibraryViewModel(
         viewModelScope.launch {
             readingPositionStore.record(projectId, orderIndex)
             _novel.update { n -> n?.takeIf { it.projectId == projectId }?.copy(lastReadOrderIndex = orderIndex) }
+            // 书架顶部的「继续读」跟着走，否则从书里退回来还会指向上一次的位置
+            _lastReadIndex.update { it + (projectId to orderIndex) }
         }
     }
 
@@ -180,12 +209,18 @@ class LibraryViewModel(
 
     fun rename(projectId: String, newTitle: String) {
         viewModelScope.launch {
+            val title = newTitle.trim()
             projectRepository.getProject(projectId)?.let { project ->
                 projectRepository.saveProject(
-                    project.copy(title = newTitle.trim(), updatedAt = System.currentTimeMillis())
+                    project.copy(title = title, updatedAt = System.currentTimeMillis())
                 )
+                // 原来这里是 `_novel.value?.takeIf { it.projectId != projectId }`：
+                // 改 A 开着 B 时确实不动，但改的正开着的那本时 takeIf 返回 null，
+                // 等于「改个名把人从书里踢回书架」。改名不动内容，把标题刷新过来就行。
+                if (_novel.value?.projectId == projectId) {
+                    _novel.value = _novel.value?.copy(title = title, status = project.status.label())
+                }
             }
-            _novel.value = _novel.value?.takeIf { it.projectId != projectId }
         }
     }
 
@@ -296,15 +331,36 @@ private val COVER_COLORS = listOf(
 
 private fun abs(value: Int): Int = if (value == Int.MIN_VALUE) 0 else if (value < 0) -value else value
 
+/** 顶部「继续写」挑哪本：最近更新的那本。空表返回 null，正好对应「没有书就不显示这张卡」。 */
+internal fun pickContinueWritingProject(projects: List<Project>): Project? =
+    projects.maxByOrNull { it.updatedAt }
+
+/**
+ * 转屏后重新落到正在读的那一章。
+ * 只认 orderIndex，不认存下来的章节对象：章节可能已被删除、或大纲已经换过版本，
+ * 解析不到就退回目录页 —— 好过把读者留在一个没有正文的空阅读界面里。
+ */
+internal fun resolveReadingChapter(
+    chapters: List<LibraryChapter>,
+    orderIndex: Int?
+): LibraryChapter? = orderIndex?.let { index -> chapters.firstOrNull { it.orderIndex == index } }
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun LibraryScreen(
     viewModel: LibraryViewModel,
+    onContinueWriting: (Project) -> Unit,
+    onOpenCreate: () -> Unit,
     onBack: () -> Unit
 ) {
     val projects by viewModel.projects.collectAsStateWithLifecycle()
     val novel by viewModel.novel.collectAsStateWithLifecycle()
-    var reading by remember { mutableStateOf<LibraryChapter?>(null) }
+    val lastReadIndex by viewModel.lastReadIndex.collectAsStateWithLifecycle()
+    val current = novel
+    // 只记序号，不记章节对象：LibraryChapter 带着整章正文，进 Bundle 在长章节上会撞
+    // Binder 的 1MB 上限（TransactionTooLarge）；正文本来就能从 chapters 里按序号再取一次。
+    var readingOrderIndex by rememberSaveable { mutableStateOf<Int?>(null) }
+    val reading: LibraryChapter? = resolveReadingChapter(current?.chapters.orEmpty(), readingOrderIndex)
     var dirReverse by rememberSaveable { mutableStateOf(false) }
     var chapterAction by remember { mutableStateOf<LibraryChapter?>(null) }
     var chapterRename by remember { mutableStateOf<LibraryChapter?>(null) }
@@ -314,9 +370,22 @@ fun LibraryScreen(
     var renameTarget by remember { mutableStateOf<Project?>(null) }
     var renameTitle by remember { mutableStateOf("") }
     var deleteTarget by remember { mutableStateOf<Project?>(null) }
-    var themeIndex by remember { mutableIntStateOf(0) }
-    var fontSize by remember { mutableIntStateOf(18) }
+    var themeIndex by rememberSaveable { mutableIntStateOf(0) }
+    var fontSize by rememberSaveable { mutableIntStateOf(18) }
     val readerThemes = listOf(followReaderTheme()) + READER_THEMES
+    // 顶部「继续读」按下的那本书：书要现打开，等目录到齐后自己落到上次那一章
+    var pendingReadId by rememberSaveable { mutableStateOf<String?>(null) }
+    val hero = pickContinueWritingProject(projects)
+    LaunchedEffect(hero?.id) { hero?.let { viewModel.refreshLastRead(it.id) } }
+    LaunchedEffect(current?.projectId, pendingReadId) {
+        val id = pendingReadId
+        val book = current
+        if (id != null && book != null && book.projectId == id) {
+            pendingReadId = null
+            readingOrderIndex = book.lastReadOrderIndex ?: lastReadIndex[id]
+        }
+    }
+
     // 存 id 而不是 Project 对象，更不能放进程级单槽。
     // 以前是 `object LibraryPendingStore { var target: Project? }`：单槽、无 key、
     // 存的是整本书（含完整连续性状态）。SAF 弹窗期间只要再触发一次导出，
@@ -345,23 +414,13 @@ fun LibraryScreen(
             }
         }
     }
-    val importLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        if (uri != null) {
-            scope.launch {
-                backupMessage = runCatching {
-                    val imported = context.contentResolver.openInputStream(uri)
-                        ?.use { app.backupStore.import(it) } ?: error("无法读取所选文件")
-                    "已导入《${imported.title}》，见书架/项目列表"
-                }.getOrElse { "导入失败：${it.message}" }
-            }
-        }
-    }
+    // 整书 JSON 导入只有一处：ExportsScreen（设置中心的「备份与导出」）。
+    // 以前这里也放一个「导入」，同一个功能两个入口两套文案，用户看到的是哪个不确定，
+    // 而且顶栏按钮越多越挤 —— 书架只留「导出」：它知道是哪本书，导入是全局动作。
 
     // 返回逻辑：阅读 → 章节列表 → 书架 → 主页，一次只退一步
-    BackHandler(enabled = reading != null) { reading = null }
-    BackHandler(enabled = reading == null && novel != null) { viewModel.close() }
+    BackHandler(enabled = reading != null) { readingOrderIndex = null }
+    BackHandler(enabled = reading == null && current != null) { viewModel.close() }
 
     val readingTheme = if (reading != null) readerThemes[themeIndex] else null
 
@@ -372,27 +431,47 @@ fun LibraryScreen(
             .padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        val current = novel
         when {
             reading != null && current != null -> {
-                val chapter = reading!!
+                val chapter = reading
                 val theme = readerThemes[themeIndex]
-                // 顶栏：左「目录」· 中章节名 · 右「书架」
+                val writingProject = current.projectId.let { id -> projects.firstOrNull { it.id == id } }
+                // 顶栏：左「目录」回本书目录 · 右「写」进写作界面 · 再右「回书架」退出这本书。
+                // 以前中间只写章节名：读第 40 章时完全看不出是哪一本，而 App 里三个界面
+                // 的 H1 都长成「《书名》」，只能靠副标题区分 —— 补一行书名。
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    TextButton(onClick = { reading = null }) { Text("〈 目录") }
-                    Text(
-                        "${chapterLabel(chapter.orderIndex)} ${cleanChapterTitle(chapter.title)}",
+                    TextButton(onClick = { readingOrderIndex = null }) { Text("〈 目录") }
+                    Column(
                         modifier = Modifier.weight(1f),
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = theme.text
-                    )
-                    TextButton(onClick = { viewModel.close(); reading = null }) { Text("书架 〉") }
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        Text(
+                            current.title,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = theme.text.copy(alpha = 0.7f)
+                        )
+                        Text(
+                            "${chapterLabel(chapter.orderIndex)} ${cleanChapterTitle(chapter.title)}",
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = theme.text
+                        )
+                    }
+                    // 读写两半在这里交汇：读完想改一句，直接进写作界面，
+                    // 不用先退回书架再点一次封面
+                    TextButton(
+                        onClick = { writingProject?.let(onContinueWriting) },
+                        enabled = writingProject != null
+                    ) { Text("写") }
+                    // 原来叫「书架 〉」：它退出的是「这本书」而不是某一屏，
+                    // 顶在另一个书架按钮旁边容易被读成「去书架页」
+                    TextButton(onClick = { viewModel.close(); readingOrderIndex = null }) { Text("回书架 〉") }
                 }
                 val writtenChapters = current.chapters.filter { it.content != null }
                 ReaderBody(
@@ -405,13 +484,13 @@ fun LibraryScreen(
                     onPrev = {
                         current.chapters.lastOrNull { it.content != null && it.orderIndex < chapter.orderIndex }?.let {
                             viewModel.recordRead(current.projectId, it.orderIndex)
-                            reading = it
+                            readingOrderIndex = it.orderIndex
                         }
                     },
                     onNext = {
                         current.chapters.firstOrNull { it.content != null && it.orderIndex > chapter.orderIndex }?.let {
                             viewModel.recordRead(current.projectId, it.orderIndex)
-                            reading = it
+                            readingOrderIndex = it.orderIndex
                         }
                     },
                     themeName = theme.name,
@@ -440,7 +519,7 @@ fun LibraryScreen(
                     Button(
                         onClick = {
                             viewModel.recordRead(current.projectId, resumeChapter.orderIndex)
-                            reading = resumeChapter
+                            readingOrderIndex = resumeChapter.orderIndex
                         },
                         modifier = Modifier.fillMaxWidth()
                     ) {
@@ -471,7 +550,7 @@ fun LibraryScreen(
                                     onClick = {
                                         if (chapter.content != null) {
                                             viewModel.recordRead(current.projectId, chapter.orderIndex)
-                                            reading = chapter
+                                            readingOrderIndex = chapter.orderIndex
                                         }
                                     },
                                     onLongClick = { chapterAction = chapter }
@@ -495,21 +574,24 @@ fun LibraryScreen(
             projects.isEmpty() -> {
                 PaperTopBar(title = "书架", onBack = onBack)
                 Text(
-                    "还没有作品。先回主页新建一本。",
+                    "还没有作品。先起一个名字，题材和大纲可以下一步再定。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                // 这里原来写的是「先回主页新建一本」—— 主页已经没了，
+                // 等于把用户支到一个不存在的界面；入口就地放在这里
+                PaperButton(
+                    "写第一本",
+                    onOpenCreate,
+                    modifier = Modifier.fillMaxWidth(),
+                    accent = true
                 )
             }
             else -> {
                 PaperTopBar(
                     title = "书架",
-                    subtitle = "点封面阅读，长按可备份或改名",
-                    onBack = onBack,
-                    trailing = {
-                        TextButton(onClick = { importLauncher.launch(arrayOf("application/json")) }) {
-                            Text("导入")
-                        }
-                    }
+                    subtitle = "点封面写作，长按可阅读、备份或改名",
+                    onBack = onBack
                 )
                 backupMessage?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall)
@@ -523,6 +605,66 @@ fun LibraryScreen(
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    // 顶部「继续写」：整个 App 最该被点到的一格。
+                    // 旧首页有这张卡，首页并进来之后由这里顶上，
+                    // 否则「接着写」要先在两列封面里认书名。
+                    hero?.let { target ->
+                        item(key = "hero-continue") {
+                            PaperSurface(modifier = Modifier.fillMaxWidth()) {
+                                Column(
+                                    modifier = Modifier.padding(16.dp),
+                                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Text(
+                                        "继续写",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                    Text(
+                                        target.title,
+                                        style = MaterialTheme.typography.titleLarge,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        StatusChip(target.status.label())
+                                        Text(
+                                            formatUpdatedAgo(target.updatedAt),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    PaperButton(
+                                        "继续写《${target.title}》",
+                                        onClick = { onContinueWriting(target) },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        accent = true
+                                    )
+                                    // 阅读是次要动词：只有真存了阅读进度才给入口，
+                                    // 放在 accent 按钮下面且不抢主色。
+                                    // 点它先开书，目录到齐后由上面的 LaunchedEffect 落到那一章。
+                                    lastReadIndex[target.id]?.let { resumeOrder ->
+                                        TextButton(
+                                            onClick = {
+                                                pendingReadId = target.id
+                                                viewModel.open(target)
+                                            },
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Text(
+                                                "▶ 续读：${chapterLabel(resumeOrder)}",
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     items(projects, key = { it.id }) { project ->
                         val cover = COVER_COLORS[abs(project.id.hashCode()) % COVER_COLORS.size]
                         Box(
@@ -531,7 +673,11 @@ fun LibraryScreen(
                                 .aspectRatio(0.72f)
                                 .background(cover, RoundedCornerShape(10.dp))
                                 .combinedClickable(
-                                    onClick = { viewModel.open(project) },
+                                    // 单击进写作界面：这是个写书 App，写作是主动词。
+                                    // 原来单击进的是本书目录（阅读面），于是从书架进得去书、
+                                    // 出不来书，也永远到不了写作界面。
+                                    // 阅读降级成长按菜单里的第二项，续读还有顶部那张卡兜着。
+                                    onClick = { onContinueWriting(project) },
                                     onLongClick = { actionTarget = project }
                                 )
                                 .padding(12.dp)
@@ -552,6 +698,13 @@ fun LibraryScreen(
                         }
                     }
                 }
+                // 旧「全部项目」页的入口也搬过来：书架现在是唯一的作品列表，
+                // 没有这一本就得空着两个标签页翻
+                PaperButton(
+                    "新建一本",
+                    onOpenCreate,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
     }
@@ -563,6 +716,23 @@ fun LibraryScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("选择要执行的操作：")
+                    // 前两项是「去干什么」，后三项是「管这本书」。
+                    // 写作排第一：单击封面已经进写作界面，这里是显式入口，
+                    // 不写的话长按菜单就只剩管理动作，没有出路
+                    Button(
+                        onClick = {
+                            actionTarget = null
+                            onContinueWriting(target)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("写这本书") }
+                    Button(
+                        onClick = {
+                            actionTarget = null
+                            viewModel.open(target)
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) { Text("阅读") }
                     Button(
                         onClick = {
                             actionTarget = null
@@ -656,7 +826,7 @@ fun LibraryScreen(
             confirmButton = {
                 TextButton(onClick = {
                     viewModel.deleteChapter(novel?.projectId.orEmpty(), chapter.orderIndex)
-                    if (reading?.orderIndex == chapter.orderIndex) reading = null
+                    if (reading?.orderIndex == chapter.orderIndex) readingOrderIndex = null
                     chapterDelete = null
                 }) { Text("确认删除", color = MaterialTheme.colorScheme.error) }
             },

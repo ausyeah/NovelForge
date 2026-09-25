@@ -1,0 +1,129 @@
+package com.novelforge.app.presentation.navigation
+
+import androidx.compose.material3.Icon
+import androidx.compose.material3.NavigationBar
+import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.unit.dp
+
+/**
+ * 全 app 的路由常量。以前 12 条路由全是散落在 NavHost 里的裸字符串，
+ * `popUpTo("creative-setup/$projectId")` 这类手拼字符串一旦写错会**静默失败**
+ * （不抛异常，只是没弹栈），用户于是要连按十几次返回才能退出。
+ */
+object Routes {
+    // —— 底部三个一级目的地 ——
+    const val BOOKS = "books"
+    const val CHAT = "chat"
+    const val SETTINGS = "settings"
+
+    // —— 设置的二级页（不是一级目的地，底部栏仍然停在「设置」）——
+    const val LEDGER = "ledger"
+    const val EXPORTS = "exports"
+
+    // —— 新建一本 ——
+    const val CREATE = "create"
+
+    // —— 书内 ——
+    const val CREATIVE_SETUP = "creative-setup/{projectId}"
+    const val OUTLINE = "outline/{projectId}"
+    const val MEMORY = "memory/{projectId}"
+    const val CHAPTER = "chapter/{projectId}/{outlineItemId}"
+
+    fun creativeSetup(projectId: String) = "creative-setup/$projectId"
+    fun outline(projectId: String) = "outline/$projectId"
+    fun outlineAuto(projectId: String) = "outline/$projectId?autostart=true"
+    fun memory(projectId: String) = "memory/$projectId"
+    fun chapter(projectId: String, itemId: String) =
+        "chapter/$projectId/${encodeSegment(itemId)}"
+    fun chapterAuto(projectId: String, itemId: String) =
+        "chapter/$projectId/${encodeSegment(itemId)}?autostart=true"
+    fun chat(projectId: String? = null) =
+        if (projectId.isNullOrBlank()) CHAT else "chat?projectId=$projectId"
+
+    /**
+     * 路径段百分号编码。
+     *
+     * 不用 `android.net.Uri.encode`：那会让整个 Routes 在 JVM 单元测试里直接抛
+     * 「not mocked」，于是这个最需要被测的地方反而测不了。不保留的字符集按
+     * RFC 3986 的 unreserved，与 Android 的实现一致；`URLEncoder` 也不行，
+     * 它把空格编成 `+`，而路径段里 `+` 是字面的加号。
+     */
+    internal fun encodeSegment(raw: String): String {
+        if (raw.isEmpty()) return raw
+        val out = StringBuilder(raw.length + 8)
+        for (byte in raw.toByteArray(Charsets.UTF_8)) {
+            val value = byte.toInt() and 0xFF
+            val char = value.toChar()
+            val unreserved = (char in 'a'..'z') || (char in 'A'..'Z') ||
+                (char in '0'..'9') || char in "-_.!~*'()"
+            if (unreserved) {
+                out.append(char)
+            } else {
+                out.append('%').append(HEX[value shr 4]).append(HEX[value and 0x0F])
+            }
+        }
+        return out.toString()
+    }
+
+    private val HEX = "0123456789ABCDEF".toCharArray()
+}
+
+/** 底部栏的三个目的地。数量按 Material 的 3–5 个来定。 */
+enum class TopLevelDestination(val route: String, val label: String, val glyph: String) {
+    Books(Routes.BOOKS, "书架", "▤"),
+    Chat(Routes.CHAT, "灵感", "✎"),
+    Settings(Routes.SETTINGS, "设置", "⚙");
+
+    companion object {
+        /**
+         * 路由带 query 参数（`chat?projectId=p1`、`outline/p1?autostart=true`），
+         * 所以这里自己先剥掉 query 再比，省得每个调用点都记得 substringBefore('?')。
+         */
+        fun fromRoute(route: String?): TopLevelDestination? =
+            entries.firstOrNull { it.route == route?.substringBefore('?') }
+    }
+}
+
+/**
+ * 哪些页面显示底部栏。
+ *
+ * 创作设置和正文页是「单任务页」，按 Google 的说法属于可以隐藏底栏的情形：
+ * 写正文时满屏只有字和进度，底栏是干扰。但**返回键必须留着** ——
+ * 隐藏底栏又把返回藏起来是这份设计唯一明确禁止的失败模式。
+ *
+ * 书内的大纲页和本书记忆则保留底栏：它们的父级就是「书架」这个 tab，
+ * 保留底栏才能一步跳回书架，而不用先退出这本书。
+ */
+fun showsBottomBar(route: String?): Boolean {
+    if (route == null) return true
+    // 只看第一段路径。这里必须按「填充后的实际路由」判断，
+    // 所以不能拿 Routes.OUTLINE（"outline/{projectId}" 这个 pattern）去比 ——
+    // 实际传进来的是 "outline/p1"，比不相等就会把书的 hub 错判成单任务页。
+    val top = route.substringBefore('?').substringBefore('/')
+    return top in BOTTOM_BAR_ROOTS
+}
+
+private val BOTTOM_BAR_ROOTS = setOf("books", "chat", "settings", "ledger", "exports", "outline", "memory")
+
+@Composable
+fun NovelForgeBottomBar(
+    current: TopLevelDestination?,
+    onSelect: (TopLevelDestination) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    NavigationBar(modifier = modifier) {
+        TopLevelDestination.entries.forEach { destination ->
+            NavigationBarItem(
+                selected = current == destination,
+                onClick = { onSelect(destination) },
+                icon = { Text(destination.glyph) },
+                label = { Text(destination.label) },
+                modifier = Modifier.padding(vertical = 0.dp)
+            )
+        }
+    }
+}

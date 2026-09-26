@@ -135,6 +135,91 @@ class MemorySelectorTest {
         assertEquals(MemorySelector.MAX_FACTS, kept.size)
     }
 
+    /**
+     * 回归：`pinned` 只保住了名额，「排在最前面」是假的。
+     *
+     * 名额排序里 `pinned` 确实是第一键，所以置顶事实一定活下来了；
+     * 但收尾那一步以前是 `sortedBy { it.updatedAt }`（纯按时间升序），
+     * 把刚排好的置顶顺序整个重排掉了。这里特意置顶**最新**的那条：
+     * 它落在保留下来的 12 条的最后一位，旧代码会把 12 条杂事的第 9 条放在最前。
+     *
+     * 这个列表是原样序列化进【连续性状态】的（PromptBuilder.buildChapterPrompt），
+     * 所以顺序对模型可见，不是内部实现细节。
+     */
+    @Test
+    fun theNewestPinnedFactStillLeadsThePromptOrder() {
+        val facts = (1..20).map {
+            ContinuityFact("f$it", "杂事$it", null, confirmed = true, updatedAt = it.toLong())
+        }.map { if (it.id == "f20") it.copy(pinned = true) else it }
+
+        val kept = MemorySelector
+            .select(ContinuityState(factsWithSources = facts))
+            .continuity.factsWithSources
+
+        assertEquals(MemorySelector.MAX_FACTS, kept.size)
+        assertEquals("置顶事实必须排在事实列表最前面，它要先被读到", "f20", kept.first().id)
+    }
+
+    /**
+     * 两条挑选路径都要兑现「置顶在前」：概要为空的那条，和概要有区分度词的那条。
+     *
+     * 同时钉住**剩下的事实仍然从旧到新**。收尾那一步按时间排本来是有用的
+     * （模型读的是一条条状态变迁：先断臂、后接上），不能为了置顶把它整个删掉。
+     * 一条很老的置顶 + 一条很新的置顶，顺便钉住置顶组内部也还是从旧到新。
+     */
+    @Test
+    fun pinnedFactsLeadAndTheRestStayChronologicalOnBothSelectionPaths() {
+        val facts = (1..20).map { index ->
+            ContinuityFact(
+                id = "f$index",
+                statement = "杂事$index：今天说完了",
+                sourceChapterId = null,
+                confirmed = true,
+                updatedAt = index.toLong(),
+                pinned = index == 4 || index == 17
+            )
+        }
+        val state = ContinuityState(factsWithSources = facts)
+
+        for (hint in listOf("", "主角在集市上买灵石")) {
+            val where = "chapterHint=<$hint>"
+            val kept = MemorySelector.select(state, chapterHint = hint).continuity.factsWithSources
+
+            assertEquals("$where 条数", MemorySelector.MAX_FACTS, kept.size)
+            assertEquals(
+                "$where 置顶组要在最前，且组内从旧到新",
+                listOf("f4", "f17"),
+                kept.take(2).map { it.id }
+            )
+            val rest = kept.drop(2).map { it.updatedAt }
+            assertEquals("$where 其余事实仍须从旧到新", rest.sorted(), rest)
+        }
+    }
+
+    /**
+     * 置顶多到吃满名额时，位置也得对：活下来的全是置顶，仍然从前到后按时间排。
+     *
+     * 顺带把一个不好但真实的后果钉在这里：置顶超过 12 条时，
+     * 未置顶的事实一条都进不了下一章。名额优先级是既有设计（`pinned` 是第一键），
+     * 这里只保证它不会再被收尾那步重排打乱。
+     */
+    @Test
+    fun whenPinnedFactsExceedTheBudgetEveryKeptFactIsPinnedAndStillOrdered() {
+        val facts = (1..20).map {
+            ContinuityFact("f$it", "杂事$it", null, confirmed = true, updatedAt = it.toLong(), pinned = true)
+        }
+
+        val kept = MemorySelector
+            .select(ContinuityState(factsWithSources = facts))
+            .continuity.factsWithSources
+
+        assertEquals(MemorySelector.MAX_FACTS, kept.size)
+        assertTrue(kept.all { it.pinned })
+        // 名额排序取的是最新的 12 条置顶，呈现顺序再把它们按从旧到新摊开
+        assertEquals(listOf("f9", "f10", "f11", "f12"), kept.take(4).map { it.id })
+        assertEquals(kept.map { it.updatedAt }.sorted(), kept.map { it.updatedAt })
+    }
+
     /** 单字名主角以前结构上无法被捞回。 */
     @Test
     fun singleCharacterNameIsStillMatched() {
@@ -251,7 +336,7 @@ class MemorySelectorTest {
         val structured = notes.first { it.statement == "沈砚的左臂已接上" }
         assertEquals("沈砚", structured.subject)
         assertEquals("左臂状态", structured.predicate)
-        // 旧格式必须仍���解析，只是没有主体/属性名
+        // 旧格式必须仍能解析，只是没有主体/属性名
         assertEquals("", notes.first { it.statement == "阿禾左眼有疤" }.subject)
     }
 

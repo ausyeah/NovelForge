@@ -326,7 +326,7 @@ fun CreativeSetupScreen(
 
         Text(
             "单章字数越高，生成耗时、失败概率与额度消耗越高，建议 2000–4000 字。" +
-                "章节数越多，所需输出额度越高；若生成结果不完整，可提高模型设置中的输出预算后重试。",
+                "章节数越多，所需输出额度越高；若生成结果不完整，可提高「设置 → 连接」中的输出预算后重试。",
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 

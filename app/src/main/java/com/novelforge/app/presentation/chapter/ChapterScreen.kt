@@ -51,7 +51,50 @@ import com.novelforge.app.presentation.common.cleanChapterTitle
 import kotlinx.coroutines.launch
 
 /** 不冻结：正文列表跟着生成实时增长。段落条数不会是负数，用 -1 当哨兵值。 */
-private const val FOLLOW_PARAGRAPHS = -1
+internal const val FOLLOW_PARAGRAPHS = -1
+
+/**
+ * 「冻结在第几条」这一步的纯判定：从 [previous] 出发，正文已经长到 [liveCount] 段，
+ * 而读者在 [atBottom]（并且惯性滚动 [scrolling]、手指还按着 [touching]）时，
+ * 冻结点下一步该落在哪。
+ *
+ * 抽成纯函数是因为手势和重组都测不了，而这三条规则正好是这道 bug 的全部：
+ * 曾经 frozenAt 只拿得到哨兵值，于是"冻结"是句空话——reverseLayout 下新段落
+ * 插到视口下方、每来一条就把上面所有内容顶走一格，用户看到的是"自己没动，
+ * 页面自己在抽"，而"触底才跟随"也跟着形同虚设。
+ *
+ * @param previous 上一轮的冻结点（[FOLLOW_PARAGRAPHS] 表示上一轮在跟随）
+ * @param liveCount 此刻正文一共多少段
+ */
+internal fun nextFrozenAt(
+    previous: Int,
+    liveCount: Int,
+    atBottom: Boolean,
+    scrolling: Boolean,
+    touching: Boolean
+): Int = when {
+    // 落回绝对底部、手也抬了、惯性也停了 —— 解冻，重新跟随最新一段
+    atBottom && !scrolling && !touching -> FOLLOW_PARAGRAPHS
+    // 已经在冻结中：绝不能改写成 liveCount。
+    // 改了就等于每来一段就多显示一段，"冻结"名存实亡 —— 这正是它当初失效的方式
+    previous != FOLLOW_PARAGRAPHS -> previous
+    // 刚进入冻结：把此刻已有的条数钉住，之后新增的段落一条都不再写进列表
+    else -> liveCount
+}
+
+/**
+ * 冻结时显示多少段：冻结点是几就显示几段。末端那一段（正在写的那一段）仍在冻结
+ * 范围内原地刷新，所以"看得出还在长"这件事不受影响；后面的新段落一条都不加。
+ *
+ * 存档里的冻结点可能来自旧版本或被截断的 Bundle，所以两头都得夹住：
+ * 负数会让 [List.take] 直接抛 IllegalArgumentException，炸在这一页最没道理的地方；
+ * 比正文长的冻结点只是退化成"全显示"，不会越界。
+ */
+internal fun visibleParagraphCount(liveCount: Int, frozenAt: Int): Int = when {
+    frozenAt < 0 -> liveCount
+    frozenAt >= liveCount -> liveCount
+    else -> frozenAt
+}
 
 /**
  * 相邻章节的跳转目标（写作流专用，与 LibraryScreen 的读者翻页、OutlineScreen 的详情翻页不是一回事）。
@@ -206,6 +249,9 @@ fun ChapterScreen(
                         contentState.firstVisibleItemScrollOffset == 0
                 }
             }
+            // 手指抬起来之后 fling 还在继续，那段时间 touching 已经是 false。
+            // 不看 isScrollInProgress 就会在惯性滚动途中解冻，页面当场抽搐一下。
+            val scrolling by remember { derivedStateOf { contentState.isScrollInProgress } }
             // 手势/滚动中只暂缓"新增段落"的插位（防视口被顶跳）；
             // 正在生成的末段永远原地刷新——内容必须看得出一直在长
             //
@@ -219,17 +265,23 @@ fun ChapterScreen(
             var frozenAt by rememberSaveable(job?.id, revision?.id) {
                 mutableStateOf(FOLLOW_PARAGRAPHS)
             }
-            val displayParagraphs = remember(frozenAt, paragraphs) {
-                if (frozenAt == FOLLOW_PARAGRAPHS) {
-                    paragraphs.reversed()
-                } else {
-                    paragraphs.take(frozenAt).reversed()
-                }
+            val shownCount = remember(frozenAt, paragraphs) {
+                visibleParagraphCount(paragraphs.size, frozenAt)
+            }
+            val displayParagraphs = remember(shownCount, paragraphs) {
+                paragraphs.take(shownCount).reversed()
             }
             // 规则只有一条：在绝对底部就让列表跟上（末段原地变长不跳）；
-            // 不在底部就完全不写列表——内容刷新由末段替换保证，不新增条目不顶视口
-            LaunchedEffect(paragraphs, atBottom) {
-                if (atBottom) frozenAt = FOLLOW_PARAGRAPHS
+            // 不在底部就完全不写列表——内容刷新由末段替换保证，不新增条目不顶视口。
+            // 手指按住（touching）和惯性滚动（scrolling）同样算"不在跟随"：
+            // 前者是"按住 = 定住"，抬手后还得再看落点；后者是手指已经离开、
+            // fling 还在走，那一刻 atBottom 可能正好为真（正在往底部滑回去），
+            // 照跟就等于在半路上把攒下的段落一次性塞进视口——正是当年那个"抽搐"。
+            //
+            // 以前这里只写哨兵值，等于整条冻结策略是空话：frozenAt 永远不等于
+            // 真实条数，paragraphs.take(frozenAt) 是死代码，列表永远跟着实时正文跑。
+            LaunchedEffect(paragraphs, atBottom, scrolling, touching) {
+                frozenAt = nextFrozenAt(frozenAt, paragraphs.size, atBottom, scrolling, touching)
             }
             Text(
                 if (revision == null) "正文 · 生成中的中间结果" else "正文 · 修订 ${revision.revision}",
@@ -241,10 +293,23 @@ fun ChapterScreen(
                     .weight(1f)
                     .fillMaxWidth()
                     .pointerInput(Unit) {
+                        // 手指按下即冻结：按住 = 定住，抬手且落回底部才补齐。
+                        //
+                        // 用 Initial pass：这个 Box 是 LazyColumn 的祖先，Initial 阶段
+                        // 祖先先收到 down，能在同一帧里把 touching 立起来，早于列表
+                        // 开始滚动。全程只读不 consume，所以滚动手势、以及将来
+                        // 包在里面的文字选择手势都不会被吃掉。
+                        //
+                        // 收尾必须自己轮询到"没有手指按着"为止。原来这里只
+                        // await 了一个事件，而那一个多半是指尖刚碰下来的 MOVE，
+                        // 手指还按着 touching 就被清成了 false —— 于是"按住即冻结"
+                        // 就算接上线也只有一帧寿命。跟 ChatScreen 用同一套写法。
                         awaitEachGesture {
-                            awaitFirstDown(requireUnconsumed = false)
+                            awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                             touching = true
-                            awaitPointerEvent(PointerEventPass.Final)
+                            do {
+                                val event = awaitPointerEvent(pass = PointerEventPass.Initial)
+                            } while (event.changes.any { it.pressed })
                             touching = false
                         }
                     }
@@ -255,7 +320,12 @@ fun ChapterScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 8.dp)
                 ) {
-                    itemsIndexed(displayParagraphs, key = { i, _ -> i }) { _, paragraph ->
+                    // 键用正文里的原序号，不是显示位置。reverseLayout 下新段落是
+                    // "插在前面"，用位置键的话解冻那一刻视口里每一条都会拿到
+                    // 别人的文本（字在原地、句子全换了），正是这次要消灭的那种跳动；
+                    // 原序号让旧段落保住同一个键，组合状态跟着内容走。
+                    // 键恒为 0..shownCount-1，不重复。
+                    itemsIndexed(displayParagraphs, key = { i, _ -> shownCount - 1 - i }) { _, paragraph ->
                         Text(
                             paragraph,
                             modifier = Modifier.fillMaxWidth(),

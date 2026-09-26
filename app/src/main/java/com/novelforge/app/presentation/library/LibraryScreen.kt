@@ -105,7 +105,14 @@ class LibraryViewModel(
     private val chapterRepository: ChapterRepository,
     private val generationArtifactRepository: com.novelforge.app.domain.repository.GenerationArtifactRepository,
     private val readingPositionStore: com.novelforge.app.data.settings.ReadingPositionStore,
-    private val coverStore: com.novelforge.app.data.cover.BookCoverStore
+    private val coverStore: com.novelforge.app.data.cover.BookCoverStore,
+    /**
+     * 删书时要回收的按书开关。默认从 app 容器取同一个单例
+     * （就是 GenerationRuntime 用的那一个），所以导航层不必改；
+     * 要显式传 `application.autoRunStore` 也可以。
+     */
+    private val autoRunStore: com.novelforge.app.data.settings.AutoRunStore =
+        com.novelforge.app.infrastructure.backup.NovelForgeRefs.application.autoRunStore
 ) : ViewModel() {
     val projects: StateFlow<List<Project>> = projectRepository.observeProjects()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -244,6 +251,12 @@ class LibraryViewModel(
             // 封面文件和数据条目都得跟着走：项目 id 会复用，
             // 留着的话新书一建出来就顶着上一本书的封面
             runCatching { coverStore.clear(projectId) }
+            // 一键全自动的开关是同一个理由，而且后果更贵：它是按 projectId 存的
+            // 单个 DataStore 条目，不清的话 id 复用后新书一开箱就是「已开全自动」，
+            // 第一章生成成功就自动往下写 —— 直接开始计费，用户完全没按过开关
+            // （见 AutoRunStore 的类注释里那个「A 书的开关驱动 B 书」的旧事故）。
+            // AutoRunStore.clear() 以前是死代码：写进去了，没有任何地方回收。
+            runCatching { autoRunStore.clear(projectId) }
             _novel.value = _novel.value?.takeIf { it.projectId != projectId }
         }
     }
@@ -299,7 +312,9 @@ class LibraryViewModel(
         private val chapterRepository: ChapterRepository,
         private val generationArtifactRepository: com.novelforge.app.domain.repository.GenerationArtifactRepository,
         private val readingPositionStore: com.novelforge.app.data.settings.ReadingPositionStore,
-        private val coverStore: com.novelforge.app.data.cover.BookCoverStore
+        private val coverStore: com.novelforge.app.data.cover.BookCoverStore,
+        private val autoRunStore: com.novelforge.app.data.settings.AutoRunStore =
+            com.novelforge.app.infrastructure.backup.NovelForgeRefs.application.autoRunStore
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T = LibraryViewModel(
@@ -308,7 +323,8 @@ class LibraryViewModel(
             chapterRepository,
             generationArtifactRepository,
             readingPositionStore,
-            coverStore
+            coverStore,
+            autoRunStore
         ) as T
     }
 }

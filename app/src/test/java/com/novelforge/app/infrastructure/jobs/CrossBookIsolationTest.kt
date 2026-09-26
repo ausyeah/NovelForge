@@ -89,13 +89,20 @@ class CrossBookIsolationTest {
     }
 
     /**
-     * 回归：任务行被「全新重生成大纲」清掉之后，还在收尾的 worker
-     * 不能把它插回来。生产实现用 UPDATE ... WHERE id=:id（不是 REPLACE），
-     * REPLACE 落在不存在的行上等于 INSERT，会把任务复活成 COMPLETED，
-     * 并把旧正文挂回新目录 —— 这就是「串书」最直接的一种形态。
+     * 回归：任务行被「全新重生成大纲」清掉之后，还在收尾的 worker 不能把它插回来。
+     *
+     * ⚠️ 这里原来有一版 `aDeletedJobIsNeverResurrected`，它直接调用本文件里
+     * 手写 fake 的 `updateJobIfExists`，断言的是「fake 自己写对了」——
+     * 被断言的是 `if (!jobs.containsKey(job.id)) return false` 这一行，而不是任何
+     * 生产代码。当时生产侧一次都没调用过 `updateJobIfExists`，CI 却是绿的。
+     * 真正跑 `GenerationCoordinator` 的回归测试在
+     * `SupersededJobIsolationTest`，那里被测的是生产类本身。
+     *
+     * Room 那一层（`RoomGenerationRepository.updateJobIfExists` 是否真的映射到
+     * `UPDATE ... WHERE id = :id` 而不是 `upsert`）JVM 测不了，需要 androidTest + 设备。
      */
     @Test
-    fun aDeletedJobIsNeverResurrected() = kotlinx.coroutines.runBlocking {
+    fun deleteAllJobs_reallyRemovesEveryRowOfThatBook() = kotlinx.coroutines.runBlocking {
         val repository = RecordingRepository()
         val job = GenerationJob(
             id = "job-1",
@@ -107,18 +114,12 @@ class CrossBookIsolationTest {
             updatedAt = 1
         )
         repository.createJob(job)
-        assertTrue(repository.updateJobIfExists(job.copy(status = GenerationJobStatus.RUNNING)))
+        assertEquals(1, repository.jobs.size)
 
-        // 重生成大纲：清掉这本书的旧任务
         repository.deleteAllJobs("book-A")
-        assertTrue(repository.jobs.isEmpty())
 
-        // 飞行中的 worker 这时才收尾
-        assertFalse(
-            "任务行已经没了，收尾必须落空",
-            repository.updateJobIfExists(job.copy(status = GenerationJobStatus.COMPLETED))
-        )
-        assertTrue("不能凭空多出一行", repository.jobs.isEmpty())
+        assertTrue(repository.jobs.isEmpty())
+        assertEquals("B 书的任务不能被 A 书的清库带走", null, repository.findById("nope"))
     }
 
     /**
@@ -194,12 +195,15 @@ class CrossBookIsolationTest {
             return job
         }
 
+        /** REPLACE：行不存在时照样插回来，生产就是这样 */
         override suspend fun updateJob(job: GenerationJob) {
             jobs[job.id] = job
         }
 
+        /** 生产的实现是事务内 findById 为空即落空 —— 行被删也算落空 */
         override suspend fun updateJobIfNotCancelled(job: GenerationJob): Boolean {
             if (jobs[job.id]?.status == GenerationJobStatus.CANCELLED) return false
+            if (!jobs.containsKey(job.id)) return false
             jobs[job.id] = job
             return true
         }

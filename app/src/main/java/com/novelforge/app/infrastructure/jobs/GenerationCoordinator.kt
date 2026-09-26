@@ -25,6 +25,13 @@ sealed interface GenerationEvent {
         val reasoningTokens: Long? = null
     ) : GenerationEvent
     data class Completed(val content: String, val finishReason: String?) : GenerationEvent
+
+    /**
+     * 任务行已经不在库里了：「全新重生成大纲」清库、用户手术删章、删项目。
+     * 收尾必须就此打住 —— 既不能把行插回来，也不能再发 [Completed]，
+     * 否则上游会把这一次的旧输出当成新结果落进新目录。
+     */
+    data object Superseded : GenerationEvent
 }
 
 class GenerationCoordinator(
@@ -63,7 +70,13 @@ class GenerationCoordinator(
             createdAt = now(),
             updatedAt = now()
         )
-        generationRepository.updateJob(running)
+        // 必须是条件更新，不能用 upsert（REPLACE）。REPLACE 落在已删除的行上等于 INSERT：
+        // 「全新重生成大纲」清掉的旧任务会被复活，worker 再把旧正文挂回新目录。
+        // 行没了 = 这次生成已经被作废，直接放弃，别白烧一次 LLM 调用。
+        if (!generationRepository.updateJobIfExists(running)) {
+            emit(GenerationEvent.Superseded)
+            return@flow
+        }
         emit(GenerationEvent.Status(GenerationJobStatus.RUNNING))
 
         // Structured responses must be regenerated from the saved prompt when
@@ -144,7 +157,13 @@ class GenerationCoordinator(
                 lastCheckpointAt = now(),
                 updatedAt = now()
             )
-            generationRepository.updateJob(completed)
+            // 收尾同样必须落空。这里是「飞行中的 worker 写回已删除任务」的唯一出口：
+            // 写不进去就绝不能发 Completed —— 上游只认 Completed 才落内容，
+            // 发了就等于把旧大纲/旧正文当成新结果写进新目录。
+            if (!generationRepository.updateJobIfExists(completed)) {
+                emit(GenerationEvent.Superseded)
+                return@flow
+            }
             if (finalStatus == GenerationJobStatus.COMPLETED) {
                 emit(GenerationEvent.Completed(content.toString(), finishReason))
             } else {

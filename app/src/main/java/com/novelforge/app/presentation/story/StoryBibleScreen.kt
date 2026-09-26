@@ -108,7 +108,14 @@ class StoryBibleViewModel(
         }
     }
 
-    /** 置顶：让这条设定每章都带，且排在最前面，不受新旧排序影响。 */
+    /**
+     * 置顶：让这条设定每章都带，且整条排在事实列表最前面。
+     *
+     * 两条保证都在 [com.novelforge.app.infrastructure.llm.MemorySelector] 里兑现：
+     * 占名额靠 `pinned` 是名额排序的第一键，排在最前靠收尾的呈现顺序
+     * （置顶组整体提到最前，组内仍从旧到新；其余事实从旧到新）。
+     * 以前呈现顺序是纯粹按 `updatedAt` 排的，于是名额保住了、顺序没保住。
+     */
     fun togglePin(fact: ContinuityFact) {
         mutate(null, successText = null) { state ->
             state.copy(

@@ -62,7 +62,7 @@ fun GenerationStatusCard(
                         savedCharacters == 0 && elapsedSeconds < 20 ->
                             "模型正在思考中；思考过程不计入正文，最终内容到达后会实时更新"
                         savedCharacters == 0 ->
-                            "模型仍在思考或等待响应，已等待 ${elapsedSeconds} 秒；可取消后检查网络和模型设置"
+                            "模型仍在思考或等待响应，已等待 ${elapsedSeconds} 秒；可取消后检查网络和「设置 → 连接」"
                         else ->
                             "正在接收模型输出，已生成的内容会持续保存"
                     }

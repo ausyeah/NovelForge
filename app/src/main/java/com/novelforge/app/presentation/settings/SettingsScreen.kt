@@ -141,9 +141,10 @@ fun SettingsScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         PaperTopBar(title = "设置", subtitle = "模型连接、壁纸与预设配置", onBack = onBack)
-        // 账本和备份导出以前是首页上的两个平级磁贴，和「模型设置」摆在一起，
-        // 但它们都不是设置项 —— 一个是用量事实，一个是数据搬运。
-        // 收进设置当二级页之后，首页只剩「书架 / 灵感 / 设置」三个一级入口。
+        // 账本和备份导出都不是设置项 —— 一个是用量事实，一个是数据搬运 ——
+        // 所以收进设置当二级页，一级入口只留「书架 / 灵感 / 设置」三个。
+        // （原文写的是"以前和首页上的『模型设置』磁贴摆在一起"，
+        //  那个首页早就不存在了，留着会让人以为还有一页可找。）
         PaperSurface(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(vertical = 4.dp),

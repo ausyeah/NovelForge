@@ -503,7 +503,7 @@ class ChatViewModel(
             try {
                 val settings = settingsStore.settings.first()
                 val apiKey = apiKeyStore.read()
-                    ?: throw IllegalStateException("请先在模型设置中保存 API Key")
+                    ?: throw IllegalStateException("请先在「设置 → 连接」中保存 API Key")
                 // 灵感助手强制带思考：不受全局“关闭思考模式”影响，
                 // 否则服务端根本不返回 reasoning_content，无从展示
                 val config = LLMConnectionConfig(

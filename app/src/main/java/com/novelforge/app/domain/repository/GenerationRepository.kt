@@ -19,6 +19,11 @@ interface GenerationRepository {
     /**
      * 行已被删除时必须落空。重生成大纲会先清掉这本书的旧任务，
      * 此时仍在收尾的 worker 不能靠 REPLACE 把行插回来。
+     *
+     * **worker 收尾一律用这个，不要用 [updateJob]**：[updateJob] 走 REPLACE，
+     * 落在已删除的行上等于 INSERT，会复活任务；而 `clientRequestId` 上有唯一索引，
+     * REPLACE 撞号时还会顺手删掉新任务那一行。建任务用 `createJob`，
+     * 用户主动触发的重置（如「修复并重试」回写 QUEUED）用 [updateJob]。
      */
     suspend fun updateJobIfExists(job: GenerationJob): Boolean
     suspend fun deleteAllJobs(projectId: String)

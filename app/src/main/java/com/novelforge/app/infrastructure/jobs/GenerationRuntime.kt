@@ -144,7 +144,9 @@ class GenerationRuntime(
     private data class PreparedExecution(
         val job: GenerationJob,
         val request: ChatRequest?,
-        val outlineProgress: OutlineProgress?
+        val outlineProgress: OutlineProgress?,
+        /** 准备阶段就发现任务行已被删除：本次生成作废，禁止继续调用模型或落任何内容 */
+        val superseded: Boolean = false
     )
 
     fun observeJob(id: String): Flow<GenerationJob?> = generationRepository.observeJob(id)
@@ -180,8 +182,10 @@ class GenerationRuntime(
             val fresh = generationRepository.findById(job.id) ?: continue
             if (fresh.status != GenerationJobStatus.QUEUED && fresh.status != GenerationJobStatus.RUNNING) continue
             // 有检查点内容的正文/大纲任务收尸为 RECOVERABLE_PARTIAL 会被重试覆盖旧流，
-            // 统一记 FAILED：UI 出现「重试」，重试路径自带 checkpoint 回填
-            generationRepository.updateJob(
+            // 统一记 FAILED：UI 出现「重试」，重试路径自带 checkpoint 回填。
+            // 条件更新：读到 fresh 之后行仍可能被清掉，REPLACE 会把用户刚删的任务
+            // 复活成一条「生成中断，点重试」的幽灵记录。
+            generationRepository.updateJobIfExists(
                 fresh.copy(
                     status = GenerationJobStatus.FAILED,
                     errorType = "ZombieJob",
@@ -250,7 +254,7 @@ class GenerationRuntime(
                             status = GenerationJobStatus.NEEDS_USER,
                             errorMessage = "这一章已连续失败 $attempts 次，自动续写已停止。" +
                                 "请在章节页点「重试这一章」单独再试；若总是报空内容，多半是思考过程耗尽了输出额度，" +
-                                "请在模型设置中开启「关闭思考模式」或提高输出预算。",
+                                "请在「设置 → 连接」中开启「关闭思考模式」或提高输出预算。",
                             updatedAt = now()
                         )
                     )
@@ -702,6 +706,10 @@ class GenerationRuntime(
                     outlineProgress = null
                 )
             }
+            if (prepared.superseded) {
+                // 任务行在准备阶段就没了：连模型都不该调，更不能落内容
+                return GenerationExecutionResult.Success
+            }
             preparedJob = prepared.job
             model = prepared.request?.config?.model ?: settings.model
 
@@ -710,9 +718,11 @@ class GenerationRuntime(
             }
 
             var completed: GenerationEvent.Completed? = null
+            var superseded = false
             coordinator.execute(prepared.job.id, prepared.request).collect { event ->
                 when (event) {
                     is GenerationEvent.Completed -> completed = event
+                    is GenerationEvent.Superseded -> superseded = true
                     is GenerationEvent.Usage -> usage = LlmUsage(
                         inputTokens = event.inputTokens,
                         outputTokens = event.outputTokens,
@@ -726,7 +736,13 @@ class GenerationRuntime(
                     else -> Unit
                 }
             }
-            val finalJob = requireNotNull(generationRepository.findById(prepared.job.id))
+            // 最后一道闸：任务行已被删除时，这次生成的输出已经没有任何合法落点。
+            // 继续往下走会把旧大纲/旧正文当成新结果写进新目录（新批次复用 chapter-N 的
+            // id 空间），或者让下面的 catch 用 saveJobAndLlmCall 把行再插回来。
+            val finalJob = generationRepository.findById(prepared.job.id)
+            if (superseded || finalJob == null) {
+                return recordSupersededCall(prepared.job, model, settings, usage, startedAt)
+            }
             if (usage.inputTokens == null && usage.outputTokens == null) {
                 // 服务端流里没带 usage：按字符量估算（中文约 1.5 token/字），
                 // 否则账本会把真实消耗记成 0，越用越不准
@@ -857,7 +873,11 @@ class GenerationRuntime(
             updatedAt = now()
         )
         savePromptSnapshot(updatedJob, request.copy(options = request.options.copy(requestId = requestId)))
-        generationRepository.updateJob(updatedJob)
+        // 条件更新：用 upsert(REPLACE) 会把「全新重生成大纲」刚清掉的行重新插回来，
+        // worker 随后照常跑完并把旧大纲挂回新目录。写不进去就地作废。
+        if (!generationRepository.updateJobIfExists(updatedJob)) {
+            return PreparedExecution(job, request = request, outlineProgress = progress, superseded = true)
+        }
         return PreparedExecution(updatedJob, request, progress)
     }
 
@@ -1379,7 +1399,8 @@ class GenerationRuntime(
         type: String,
         message: String
     ): GenerationExecutionResult {
-        generationRepository.updateJob(
+        // 条件更新：行已经被删掉时无处可标，记了也只会复活一个幽灵 FAILED 任务
+        generationRepository.updateJobIfExists(
             job.copy(
                 status = GenerationJobStatus.FAILED,
                 errorType = type,
@@ -1390,8 +1411,41 @@ class GenerationRuntime(
         return GenerationExecutionResult.Failure
     }
 
+    /**
+     * 任务行已被删除（清库 / 删章手术 / 删项目），这次生成作废。
+     * token 账本照记 —— 请求确实发出去了，不记就成了「账本凭空少一次调用」；
+     * 但绝不能经 saveJobAndLlmCall 走一趟，那会把 job 行 REPLACE 回来。
+     * 返回 Success 而不是 Failure：作废不是失败，不该让 WorkManager 重试一次已经被删的任务。
+     */
+    private suspend fun recordSupersededCall(
+        job: GenerationJob,
+        model: String,
+        settings: AppSettings,
+        usage: LlmUsage,
+        startedAt: Long
+    ): GenerationExecutionResult {
+        try {
+            llmCallRepository.save(
+                buildLlmCall(
+                    job = job,
+                    model = model,
+                    settings = settings,
+                    usage = usage,
+                    startedAt = startedAt,
+                    success = false
+                )
+            )
+        } catch (cancelled: CancellationException) {
+            // 恰恰是这条路径最可能正在被 cancelUniqueWork 取消，不能吞掉
+            throw cancelled
+        } catch (_: Exception) {
+            // 账本写不进去也不能影响「放弃这次生成」这个决定
+        }
+        return GenerationExecutionResult.Success
+    }
+
     private suspend fun connection(settings: AppSettings): LLMConnectionConfig {
-        val key = requireNotNull(apiKeyStore.read()) { "请先在模型设置中保存 API Key" }
+        val key = requireNotNull(apiKeyStore.read()) { "请先在「设置 → 连接」中保存 API Key" }
         require(settings.baseUrl.isNotBlank()) { "请先填写 Base URL" }
         require(settings.model.isNotBlank()) { "请先填写模型名" }
         return LLMConnectionConfig(

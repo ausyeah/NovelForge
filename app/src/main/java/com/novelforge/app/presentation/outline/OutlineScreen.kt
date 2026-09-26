@@ -306,9 +306,9 @@ fun OutlineScreen(
                         )
                         job != null && job.status in REPAIRABLE_STATUSES -> Text(
                             "模型本次没有返回可用内容。常见原因：服务端限流（429）、思考型模型把输出额度耗尽在思考过程上。\n" +
-                                "请点击「重试」再试一次；若反复出现，请在模型设置中更换模型或稍后再试。"
+                                "请点击「重试」再试一次；若反复出现，请在「设置 → 连接」中更换模型或稍后再试。"
                         )
-                        job == null -> Text("还没有结构化大纲。请先在模型设置中配置 Base URL、模型名和 API Key。")
+                        job == null -> Text("还没有结构化大纲。请先在「设置 → 连接」中配置 Base URL、模型名和 API Key。")
                     }
                 }
                 if (editorActive) {

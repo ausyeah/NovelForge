@@ -20,7 +20,7 @@ class LlmAgentModel(
     suspend fun answerAboutBook(context: String, question: String): String {
         val settings = settingsStore.settings.first()
         val key = apiKeyStore.read()?.takeIf { it.isNotBlank() }
-            ?: return "请先在模型设置里保存 API Key。"
+            ?: return "请先在「设置 → 连接」中保存 API Key。"
         if (settings.baseUrl.isBlank() || settings.model.isBlank()) {
             return "请先填写 Base URL 和模型名。"
         }

@@ -24,7 +24,14 @@ data class MemorySlice(
  * - 伏笔是往后追加的，所以从最新的一条开始保（否则用户刚加的伏笔永远发不出去）；
  * - 规则按提示词命中排，作家写的第 9 条不会再被无声丢掉；
  * - 事实先看有没有点名的角色，再看和本章概要有没有共同的 distinguishing 词，最后才看新旧；
- * - 置顶的事实永远在名额里，且排在最前面。
+ * - 置顶的事实永远在名额里，且排在最前面（呈现顺序见 [forPrompt]）。
+ *
+ * 事实分成两件事，别混：
+ * - **谁占名额**：由 [selectFacts] 里的排序决定，`pinned` 是第一排序键。
+ * - **留下的怎么排进 prompt**：由 [forPrompt] 决定，`pinned` 也是第一排序键。
+ * 以前第二段收尾是 `sortedBy { it.updatedAt }`，把第一段刚排好的置顶顺序整个抹掉了 ——
+ * 名额保住了，「排在最前面」却是假的。而这个列表是原样序列化进【连续性状态】的
+ * （见 PromptBuilder.buildChapterPrompt），所以顺序对模型是可见的。
  */
 object MemorySelector {
     const val MAX_CHARACTERS = 6
@@ -109,7 +116,7 @@ object MemorySelector {
             return eligible
                 .sortedWith(compareByDescending<ContinuityFact> { it.pinned }.thenByDescending { it.updatedAt })
                 .take(MAX_FACTS)
-                .sortedBy { it.updatedAt }
+                .forPrompt()
         }
 
         // 只有「在这批事实里不算常见」的二字组才算有区分度。
@@ -131,8 +138,28 @@ object MemorySelector {
                     .thenByDescending { it.updatedAt }
             )
             .take(MAX_FACTS)
-            .sortedBy { it.updatedAt }
+            .forPrompt()
     }
+
+    /**
+     * 入选的事实送进 prompt 时的呈现顺序：**置顶的排在最前面，其余按时间从旧到新。**
+     *
+     * 为什么不是单纯 `sortedBy { it.updatedAt }`：
+     * - 「从旧到新」本身是有用的，模型读的是一条条状态变迁（先断臂、后接上），
+     *   按相关度读会像一堆互相矛盾的并列断言。所以这一段保留。
+     * - 但它以前是把 `pinned` 也一起扔掉了。作家点「一定要记住」这件事，
+     *   在这个 app 里唯一的表达方式就是置顶（见 StoryBibleScreen.togglePin），
+     *   它既保证名额（第一排序键）又该保证被优先读到 —— 事实列表整块序列化进
+     *   【连续性状态】，而 PromptBuilder 自己就引了 Lost in the Middle
+     *   （arXiv:2307.03172）说长上下文首尾注意力最强，所以「排在最前面」是有实效的，
+     *   不是文档里的一句空话。
+     * - 两段顺序都稳定且各自内部仍按时间递增，所以「从旧到新」在两个分组里都没被破坏。
+     */
+    private fun List<ContinuityFact>.forPrompt(): List<ContinuityFact> =
+        sortedWith(
+            compareByDescending<ContinuityFact> { it.pinned }
+                .thenBy { it.updatedAt }
+        )
 
     private fun relevance(
         fact: ContinuityFact,

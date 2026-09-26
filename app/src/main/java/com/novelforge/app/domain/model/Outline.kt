@@ -57,7 +57,13 @@ data class ContinuityFact(
     val updatedAt: Long,
     /** fact / thread / resolved。旧数据缺字段时当作已确认事实。 */
     val kind: String = "fact",
-    /** 作家点「一定要记住」的条目，永远占用事实名额并排在最前。 */
+    /**
+     * 作家点「一定要记住」的条目：永远占用事实名额，并排在事实列表最前面。
+     *
+     * 两条保证都由 MemorySelector 兑现：名额是第一排序键，位置由收尾的呈现顺序决定
+     * （置顶组整体在前、组内从旧到新）。这个列表原样序列化进每一章的提示词，
+     * 所以顺序对模型是可见的。
+     */
     val pinned: Boolean = false,
     /**
      * 这条设定讲的是「谁」的「什么」。两条 (subject, predicate) 相同的设定

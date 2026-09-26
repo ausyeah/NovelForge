@@ -77,6 +77,21 @@ class LedgerRankingOrderTest {
         assertEquals(3, RANKING_TOP_N)
     }
 
+    /**
+     * 区间选项必须按由近及远排。
+     *
+     * 原来「全部」排在第二位（今天 / 全部 / 近 7 天 / 近 30 天），把递增的
+     * 时间跨度从中间劈开了。这种顺序不会报错也不会崩，只是扫一眼读不出
+     * 那是一排档位 —— 所以只能钉住。
+     */
+    @Test
+    fun rangeChipsGoFromNearestToFurthest() {
+        assertEquals(
+            listOf("今天", "近 7 天", "近 30 天", "全部"),
+            RANGE_OPTIONS.map { it.second }
+        )
+    }
+
     // ---------------------------------------------------------------- 源码定位
 
     private fun queryOf(functionName: String): String {

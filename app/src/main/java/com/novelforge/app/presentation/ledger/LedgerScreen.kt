@@ -59,8 +59,19 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-/** 统计区间选项固定不变，放顶层避免每次重组重新分配这 4 个 Pair。 */
-private val RANGE_OPTIONS = listOf(-1 to "今天", 0 to "全部", 7 to "近 7 天", 30 to "近 30 天")
+/**
+ * 统计区间选项，顺序就是从近到远：今天 → 近 7 天 → 近 30 天 → 全部。
+ *
+ * 「全部」原来排在第二位（今天 / 全部 / 近 7 天 / 近 30 天），把递增的
+ * 时间跨度从中间劈开了 —— 看上去像「今天」之后紧跟一个「全部」，再往回
+ * 才是 7 天和 30 天，扫一眼读不出这是个由近及远的档位。
+ *
+ * 放顶层避免每次重组重新分配这 4 个 Pair。
+ *
+ * internal 而不是 private：单测要能读到这个列表，否则"由近及远"这条
+ * 规则没有任何东西钉着。
+ */
+internal val RANGE_OPTIONS = listOf(-1 to "今天", 7 to "近 7 天", 30 to "近 30 天", 0 to "全部")
 
 /** 使用日志一页 20 条，翻页按钮切换。 */
 private const val LOG_PAGE_SIZE = 20

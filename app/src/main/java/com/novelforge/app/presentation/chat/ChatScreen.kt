@@ -496,6 +496,17 @@ class ChatViewModel(
         _attachmentNotice.value = null
     }
 
+    /**
+     * 由界面直接写一条附件提示 —— 选择器打不开这类「连回调都进不去」的失败。
+     *
+     * 这类失败以前根本无处可说：`addImageAttachment` 的提示只在**回调被调用之后**
+     * 才可能写，而选择器没弹出来时回调压根不触发。于是用户点「＋ → 图片」，
+     * 什么都没发生，界面上一句话也没有 —— 一个纯哑的按钮。
+     */
+    fun setAttachmentNotice(message: String) {
+        _attachmentNotice.value = message
+    }
+
     fun send(input: String) {
         val text = input.trim()
         val pending = _pendingAttachments.value
@@ -1650,11 +1661,40 @@ fun ChatScreen(
             )
         }
         attachmentNotice?.let {
-            Text(
-                it,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodySmall
-            )
+            // 原来是一行 onSurfaceVariant + bodySmall 的淡灰小字，紧挨着消息列表。
+            // 附件加不上时它就是**唯一**的说明，而那个样式淡到几乎看不见 ——
+            // 于是「没提示」和「有提示」在屏幕上看起来一模一样。
+            // 现在给它 error 色和一个 ✕，和上面那条 error 一样重。
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(PaperShape)
+                    .background(MaterialTheme.colorScheme.errorContainer)
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "✕",
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        .wrapContentSize(Alignment.Center)
+                        .clip(CircleShape)
+                        .clickable { viewModel.clearAttachmentNotice() }
+                        .semantics {
+                            contentDescription = "关闭附件提示"
+                            role = Role.Button
+                        }
+                )
+            }
         }
 
         // 待发送的附件：可删、可点开看大图
@@ -1679,6 +1719,11 @@ fun ChatScreen(
             ) { uri ->
                 if (uri != null) {
                     viewModel.addImageAttachment(uri, queryDisplayName(context, uri))
+                } else {
+                    // 用户在选择器里按了返回 —— 不算错误，不提示。
+                    // 但**回调没被调用**（= 选择器压根没弹出来）是另一回事，
+                    // 那时候连这里都进不来，所以下面 launch 处也要有兜底。
+                    viewModel.clearAttachmentNotice()
                 }
             }
             val fileLauncher = rememberLauncherForActivityResult(
@@ -1686,6 +1731,8 @@ fun ChatScreen(
             ) { uri ->
                 if (uri != null) {
                     viewModel.addDocumentAttachment(uri, queryDisplayName(context, uri))
+                } else {
+                    viewModel.clearAttachmentNotice()
                 }
             }
             Box(
@@ -1713,26 +1760,43 @@ fun ChatScreen(
                             TextButton(
                                 onClick = {
                                     pickerMenuOpen = false
-                                    photoLauncher.launch(
-                                        androidx.activity.result.PickVisualMediaRequest(
-                                            ActivityResultContracts.PickVisualMedia.ImageOnly
+                                    // launch() 自己抛异常的情况要兜住。系统选择器不可用
+                                    // （设备没有照片选择器、或 PhotoPicker 权限标记缺失）
+                                    // 时这里可能直接抛，而 ActivityResultLauncher.launch
+                                    // 内部吞掉一部分失败 —— 结果就是「点了没反应」。
+                                    // 不接住的话用户永远看不到原因。
+                                    runCatching {
+                                        photoLauncher.launch(
+                                            androidx.activity.result.PickVisualMediaRequest(
+                                                ActivityResultContracts.PickVisualMedia.ImageOnly
+                                            )
                                         )
-                                    )
+                                    }.onFailure {
+                                        viewModel.setAttachmentNotice(
+                                            "无法打开图片选择器：${it.message ?: "系统未提供该功能"}"
+                                        )
+                                    }
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             ) { Text("图片（会压缩后发送）") }
                             TextButton(
                                 onClick = {
                                     pickerMenuOpen = false
-                                    fileLauncher.launch(
-                                        arrayOf(
-                                            "text/plain",
-                                            "text/markdown",
-                                            "text/csv",
-                                            "application/json",
-                                            "application/xml"
+                                    runCatching {
+                                        fileLauncher.launch(
+                                            arrayOf(
+                                                "text/plain",
+                                                "text/markdown",
+                                                "text/csv",
+                                                "application/json",
+                                                "application/xml"
+                                            )
                                         )
-                                    )
+                                    }.onFailure {
+                                        viewModel.setAttachmentNotice(
+                                            "无法打开文件选择器：${it.message ?: "系统未提供该功能"}"
+                                        )
+                                    }
                                 },
                                 modifier = Modifier.fillMaxWidth()
                             ) { Text("文本文件（txt / md / csv / json）") }

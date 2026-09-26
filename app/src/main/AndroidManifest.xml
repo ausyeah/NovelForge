@@ -16,6 +16,16 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.NovelForge"
         android:usesCleartextTraffic="false">
+
+        <!-- 灵感助手的「选图片」走 PhotoPicker（PickVisualMedia）。
+             缺这一条，ActivityResultContracts.PickVisualMedia.launch() 会
+             **静默什么都不做**：不弹选择器、回调不触发、也没有任何报错 ——
+             用户看到的就是「＋ → 添加附件 → 图片」，然后没反应。
+             那个"假按钮"就是它。 -->
+        <meta-data
+            android:name="androidx.activity.result.contract.action.PICK_VISUAL_MEDIA_PERMISSION"
+            android:value="true" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"

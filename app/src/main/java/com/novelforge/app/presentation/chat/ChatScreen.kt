@@ -58,7 +58,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
-import androidx.compose.runtime.withFrameNanos
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -1153,46 +1153,69 @@ fun ChatScreen(
         viewModel.setFrozen(!atBottom || scrolling || touching)
     }
 
-    // 键盘收起时「先触底再弹回」——修这个。
+    // 键盘收起时「先触底（底栏冒出来）再弹回」——修这个。
     //
-    // 成因是两个东西在打架：
+    // ## 两个东西在打架
+    //
     //  - 消息区是 `reverseLayout = true` 的 LazyColumn。reverseLayout 下**第一条
-    //    钉在视口底部**，内容往上长。
-    //  - 键盘收起时 `imePadding()` 的 inset 从「键盘高度」动画回 0，**视口高度
-    //    在几百毫秒里连续变大**。
-    // reverseLayout 的 LazyColumn 每次测量变化都会按「第一条仍在底部」重新锚定，
-    // 而这段时间里它自己也在被键盘顶上来 —— 两者叠加就是用户看到的：
-    // 先猛冲到底，然后弹回原处。
+    //    钉在视口底部**，内容往上长，视口一变它就按「第一条仍在底部」重新锚定。
+    //  - 视口高度在键盘收起时连续变大几百毫秒（`imePadding()` 的 inset 动画回 0），
+    //    动画**结束的那一刻底栏又冒出来**，视口再缩一次。
     //
-    // 没有一条 `scrollToItem` 是罪魁：它们只挂在 `messages.size` 和 `activeId` 上，
-    // 键盘开合不触发。所以只能从「视口变化时保住用户读到的位置」这一层解决。
+    // 用户离开底部时，重锚定就会把内容整体推走 —— 于是先看到它冲到最底下，
+    // 然后才被拉回来。
     //
-    // 做法：只在**用户主动离开底部之后**记住位置；等视口稳定（再等一帧）后
-    // 按位置复位。还在底部时不记也不复位 —— 那时列表本来就该跟着键盘走。
+    // ## 之前的做法为什么注定是「先错后对」
+    //
+    // 旧代码等的是 `LaunchedEffect(imeVisible)`，而 `imeVisible` 是
+    // `ime.getBottom(density) > 0` 这个**布尔值**：键盘动画的整几百毫秒里它都还是
+    // true，只在 inset 归零那一刻才翻转。也就是说**修正发生在漂移全部画完之后**。
+    // 再叠上「等两帧」和底栏出现带来的第二次视口变化，用户看到的就是
+    // 「提前触底 → 底栏显示 → 弹回正常位置」这一整段。
+    //
+    // `withFrameNanos` 等两帧是拍的：键盘动画约 250ms，两帧约 33ms ——
+    // 数量级差了将近十倍，等于没等。
+    //
+    // ## 现在的做法
+    //
+    // **视口每变一次就把内容按锚点钉回去，一次一帧**，不等动画结束。
+    //
+    // 关键是把「记锚点」和「用锚点」放进**同一个 collect**：视口刚变过就说明
+    // 此刻读到的位置是被重锚定冲刷出来的，不作数 —— 钉回去而不记。
+    // 分成两条 flow 就有竞态：漂移值可能在复位之前就把锚点覆盖掉，
+    // 而视口之后不再变化时那条 flow 也就不会再触发，错误就永久留下了。
     val density = LocalDensity.current
     val imeVisible = WindowInsets.ime.getBottom(density) > 0
-    // 视口正在因为键盘变化而重排：这段时间记下来的位置是被冲刷过的，不作数
-    var imeSettling by remember { mutableStateOf(false) }
-    // 用户离开底部时读到的位置（reverseLayout 下 index 0 == 底部）
-    var awayFromBottom by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    // 用户停在非底部时读到的锚点（reverseLayout 下 index 0 == 底部）。
+    // 用 `mutableStateOf` 只是为了跨重组存活，**不在组合里读**。
+    val anchor = remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    // 上一次已知的视口高度。键盘动画、底栏出现/消失、转屏都会改它。
+    val viewportHeight = remember { mutableIntStateOf(0) }
 
     LaunchedEffect(listState) {
-        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
-            .collect { (index, offset) ->
-                if (imeSettling) return@collect
-                awayFromBottom = if (index == 0 && offset == 0) null else index to offset
+        snapshotFlow {
+            Triple(
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset,
+                listState.layoutInfo.viewportSize.height
+            )
+        }.collect { (index, offset, height) ->
+            if (index == 0 && offset == 0) {
+                // 在底部：列表本来就该跟着键盘走，不记也不钉
+                anchor.value = null
+                viewportHeight.intValue = height
+                return@collect
             }
-    }
-    LaunchedEffect(imeVisible) {
-        imeSettling = true
-        // 等两帧：第一帧 inset 还在动画里，第二帧视口才稳定。
-        // 少一帧的话复位会打在动画中途，又被冲掉一次。
-        withFrameNanos { }
-        withFrameNanos { }
-        imeSettling = false
-        val anchor = awayFromBottom
-        if (anchor != null) {
-            listState.scrollToItem(anchor.first, anchor.second)
+            if (viewportHeight.intValue != height) {
+                // 视口刚变过 —— 此刻读到的位置是被重锚定冲刷出来的。
+                // 钉回锚点，但**不更新锚点**。
+                viewportHeight.intValue = height
+                val a = anchor.value
+                if (a != null) listState.scrollToItem(a.first, a.second)
+                return@collect
+            }
+            // 视口没动过，这就是用户自己滚到的位置
+            anchor.value = index to offset
         }
     }
     // 仅在用户发出新消息的瞬间跳到底部（令牌流期间绝不主动滚动）

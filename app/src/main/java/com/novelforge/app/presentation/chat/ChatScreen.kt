@@ -504,8 +504,10 @@ class ChatViewModel(
                 val settings = settingsStore.settings.first()
                 val apiKey = apiKeyStore.read()
                     ?: throw IllegalStateException("请先在「设置 → 连接」中保存 API Key")
-                // 灵感助手强制带思考：不受全局“关闭思考模式”影响，
-                // 否则服务端根本不返回 reasoning_content，无从展示
+                // 灵感助手的思考是**每组对话自己的开关**（thinkingOn），
+                // 不是全局「关闭思考模式」的附庸 —— 见下面 521 行和 1094 行。
+                // （这里原来写的是「强制带思考：不受全局关闭思考模式影响」，
+                //  那是改之前的样子，照着它会以为改不了。）
                 val config = LLMConnectionConfig(
                     baseUrl = settings.baseUrl.trim(),
                     apiKey = apiKey,

@@ -727,10 +727,22 @@ fun LibraryScreen(
                                     .padding(14.dp)
                             ) {
                                 Text("${chapterLabel(chapter.orderIndex)} · ${cleanChapterTitle(chapter.title)}")
-                                Text(
-                                    if (chapter.content != null) "点击阅读 · 长按重命名/删除" else "未生成正文 · 长按可删除",
-                                    style = MaterialTheme.typography.bodySmall
-                                )
+                                // 这里原来每张卡片都跟一句「点击阅读 · 长按重命名/删除」，
+                                // 三十张章节就是同一句话重复三十遍 —— 而长按是 Android
+                                // 的通用手势，不需要逐个卡片教。删掉之后卡片从两行变一行，
+                                // 一屏能多看不少章。
+                                //
+                                // 只给**没写正文**的章节留一行状态说明：那种卡片点下去
+                                // 什么也不会发生（onClick 里判了 content != null），
+                                // 不标出来就是个死区域。但只写「未生成正文」，
+                                // 不再附带「长按可删除」——那半句才是冗余的来源。
+                                if (chapter.content == null) {
+                                    Text(
+                                        "未生成正文",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                             }
                         }
                     }

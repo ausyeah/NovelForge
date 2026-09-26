@@ -66,6 +66,17 @@ private val RANGE_OPTIONS = listOf(-1 to "今天", 0 to "全部", 7 to "近 7 �
 private const val LOG_PAGE_SIZE = 20
 
 /**
+ * 排行最多显示几个。
+ *
+ * 3 是"能看出谁用得最多"的最小数目。再多对用户没有可执行的价值，
+ * 只是把这一屏撑长。全量记录在下面的使用日志里，一条不少。
+ *
+ * internal 而不是 private：单测要能读到这个值，否则"只显示 3 个"这条
+ * 规则没有任何东西钉着。
+ */
+internal const val RANKING_TOP_N = 3
+
+/**
  * 日志一屏 20 行，timeFormat 每次重组都被调 20 次；SimpleDateFormat 每次都要新建（且非线程安全），
  * 换成可复用、线程安全的 DateTimeFormatter，只在类加载时建一次。
  */
@@ -224,10 +235,26 @@ fun LedgerScreen(viewModel: LedgerViewModel, onBack: () -> Unit) {
         }
         if (models.isNotEmpty()) {
             item {
+                // 只显示前 3 个。排行回答的是"谁用得最多"，第 4 名往后没有可执行的
+                // 结论，却把这一屏撑得很长；要逐条看，下面"使用日志"里有全部记录。
+                //
+                // **必须在这里截，不能在 ViewModel 里截**：LedgerTotals 的
+                // totalInput / totalOutput / totalCalls 全都从完整列表求和，
+                // 提前截成 3 行，总量就只统计了前三个模型 —— 那种错很难被发现。
+                val top = models.take(RANKING_TOP_N)
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("模型使用排行 · 共 ${models.size} 个", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodySmall)
-                        models.forEach { row -> ModelUsageRow(row, totals.maxModelTokens) }
+                        Text(
+                            // 写明是"前 3"，不静悄悄把其余的藏起来
+                            if (models.size > RANKING_TOP_N) {
+                                "模型使用排行 · 前 $RANKING_TOP_N / 共 ${models.size} 个"
+                            } else {
+                                "模型使用排行 · 共 ${models.size} 个"
+                            },
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        top.forEach { row -> ModelUsageRow(row, totals.maxModelTokens) }
                     }
                 }
             }

@@ -248,7 +248,12 @@ interface LlmCallDao {
             "SUM(COALESCE(cachedInputTokens,0)) AS cachedInputTokens, SUM(COALESCE(reasoningTokens,0)) AS reasoningTokens, " +
             "SUM(estimated) AS estimatedCalls " +
             "FROM llm_calls WHERE createdAt >= :since GROUP BY provider, model " +
-            "ORDER BY (inputTokens + outputTokens) DESC"
+            // 把两个 SUM 原样重写一遍，而不是靠 `inputTokens + outputTokens`
+            // 命中结果列别名：llm_calls 本身就有同名的真实列，别名与列同名时
+            // 解析顺序并不是想当然，写全聚合式才不依赖 SQLite 的取舍。
+            // 一旦解析成"取某一行自己的 token"，排序就成了随机的 ——
+            // 那正是"排行没有排行"的来源。
+            "ORDER BY (SUM(COALESCE(inputTokens,0)) + SUM(COALESCE(outputTokens,0))) DESC"
     )
     fun observeModelSummariesSince(since: Long): Flow<List<LlmCallModelSummaryRow>>
 
@@ -257,7 +262,10 @@ interface LlmCallDao {
             "SUM(COALESCE(c.inputTokens,0)) AS inputTokens, SUM(COALESCE(c.outputTokens,0)) AS outputTokens " +
             "FROM llm_calls c LEFT JOIN projects p ON p.id = c.projectId " +
             "WHERE c.createdAt >= :since AND c.projectId != '' GROUP BY c.projectId " +
-            "HAVING (inputTokens + outputTokens) > 0 ORDER BY (inputTokens + outputTokens) DESC"
+            "HAVING (SUM(COALESCE(c.inputTokens,0)) + SUM(COALESCE(c.outputTokens,0))) > 0 " +
+            // 同上：写全聚合式，不靠别名。同名列（c.inputTokens）真实存在，
+            // 靠别名解析的排序可能压根没排上。
+            "ORDER BY (SUM(COALESCE(c.inputTokens,0)) + SUM(COALESCE(c.outputTokens,0))) DESC"
     )
     fun observeProjectSummaries(since: Long): Flow<List<LlmCallProjectSummaryRow>>
 

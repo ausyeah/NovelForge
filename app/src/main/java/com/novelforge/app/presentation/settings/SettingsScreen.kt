@@ -5,16 +5,25 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
@@ -60,7 +69,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     settingsStore: AppSettingsStore,
@@ -102,6 +111,10 @@ fun SettingsScreen(
     var latencySummary by remember { mutableStateOf<String?>(null) }
     var models by remember { mutableStateOf<List<String>?>(null) }
     var fetchingModels by remember { mutableStateOf(false) }
+    // 模型列表默认收起：8 个模型原来一人一行，光这一块就吃掉小半屏，
+    // 把 API Key 和下面的开关全顶出屏幕。选完模型自动收起。
+    var modelsExpanded by remember { mutableStateOf(false) }
+
     var loadedOk by remember { mutableStateOf(false) }
     var presets by remember { mutableStateOf<List<ModelPreset>>(emptyList()) }
     var editingPresetId by remember { mutableStateOf<String?>(null) }
@@ -300,6 +313,9 @@ fun SettingsScreen(
                     fetchingModels = false
                     result.onSuccess { list ->
                         models = list
+                        // 刚拉完就展开：用户点这一下就是为了挑模型，
+                        // 藏着等于让人再点一次。挑完会自动收起（见下）。
+                        modelsExpanded = list.isNotEmpty()
                         connectionMessage = "已获取 ${list.size} 个模型，点击即可填入"
                     }.onFailure {
                         connectionMessage = "拉取模型列表失败：${userMessage(it)}"
@@ -315,19 +331,76 @@ fun SettingsScreen(
             if (list.isEmpty()) {
                 Text("该服务商没有返回任何模型", style = MaterialTheme.typography.bodySmall)
             } else {
-                // 不能内嵌 verticalScroll：会和页面外层滚动打架，导致整页卡住滑不动
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    list.forEach { name ->
-                        FilterChip(
-                            selected = settings.model == name,
-                            onClick = {
-                                settings = settings.copy(model = name)
-                                saved = false
-                                // 点选即持久化，和主题一样即时生效
-                                scope.launch { settingsStore.update { current -> current.copy(model = name) } }
+                // 可展开的模型列表。
+                //
+                // 原来是 Column + 一行一个 FilterChip：8 个模型就是 8 行、近 400dp，
+                // 把 API Key 和下面的开关全顶出屏幕。现在收起时只占一行标题，
+                // 展开时用 FlowRow 让芯片按宽度自动换行，8 个大约两行。
+                //
+                // 不用内嵌 verticalScroll：会和页面外层滚动打架，整页卡住滑不动
+                // （SettingsScreen 别的地方踩过这个坑）。所以用"收起"来省空间。
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .clickable { modelsExpanded = !modelsExpanded }
+                            .defaultMinSize(minHeight = 48.dp)
+                            .semantics {
+                                stateDescription = if (modelsExpanded) "已展开" else "已收起"
                             },
-                            label = { Text(name, style = MaterialTheme.typography.bodySmall) }
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            "${if (modelsExpanded) "▾" else "▸"} 已获取 ${list.size} 个模型",
+                            style = MaterialTheme.typography.bodyMedium,
+                            modifier = Modifier.weight(1f)
                         )
+                        if (settings.model.isNotBlank()) {
+                            Text(
+                                "当前：${settings.model}",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                    if (modelsExpanded) {
+                        // 有些网关会返回上百个模型，全铺出来就是一堵墙。
+                        // 上面「模型名」本来就能直接手输，所以截断并说明，
+                        // 而不是给一份找不到项的列表。
+                        val shown = list.take(MODEL_CHIP_LIMIT)
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            shown.forEach { name ->
+                                FilterChip(
+                                    selected = settings.model == name,
+                                    onClick = {
+                                        settings = settings.copy(model = name)
+                                        saved = false
+                                        // 点选即持久化，和主题一样即时生效
+                                        scope.launch {
+                                            settingsStore.update { current -> current.copy(model = name) }
+                                        }
+                                        // 选完就收起：这正是点开它的目的，
+                                        // 留着只是把下面的字段继续顶走
+                                        modelsExpanded = false
+                                    },
+                                    label = { Text(name, style = MaterialTheme.typography.bodySmall) }
+                                )
+                            }
+                        }
+                        if (list.size > MODEL_CHIP_LIMIT) {
+                            Text(
+                                "还有 ${list.size - MODEL_CHIP_LIMIT} 个未显示，可在上方「模型名」直接输入",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                     }
                 }
             }
@@ -561,4 +634,13 @@ private suspend fun persistSettings(
 
 private fun userMessage(error: Throwable): String =
     error.message?.takeIf { it.isNotBlank() } ?: "设备安全存储或网络配置不可用"
+
+/**
+ * 展开时最多画多少个模型芯片。
+ *
+ * 有些网关（聚合站居多）的 /models 会返回上百个，全铺出来就是一堵墙，
+ * 比"一人一行"更没法看。截断并明确告知剩下多少 —— 上方「模型名」本来就能
+ * 直接手输，不给一份找不到项的列表。
+ */
+internal const val MODEL_CHIP_LIMIT = 40
 

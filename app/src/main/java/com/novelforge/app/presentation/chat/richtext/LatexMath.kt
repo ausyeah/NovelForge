@@ -76,9 +76,63 @@ data class MathStyle(
     val variableItalic: Boolean = true
 )
 
-/** 把一段 LaTeX 源码渲染成 [MathExpression]。永远不会抛异常。 */
-fun buildMathExpression(source: String, style: MathStyle = MathStyle()): MathExpression =
-    MathRenderer(style).render(LatexParser(source).parseAll(), source)
+/** 把一段 LaTeX 源码渲染成 [MathExpression]。**不抛异常** —— 渲染不了就返回空，调用方退回显示原文。 */
+fun buildMathExpression(source: String, style: MathStyle = MathStyle()): MathExpression {
+    // 源码长度上限。解析本身是 O(n)，但长度直接决定递归深度能堆多高，
+    // 也决定后面排版要生成多少个占位部件。
+    // 真实公式几百字符封顶；到这个长度还解析不完的，一定是模型抽风。
+    if (source.length > MAX_SOURCE_CHARS) return degraded(source)
+    // `StackOverflowError` 是 Error 不是 Exception，`catch (e: Exception)` 抓不到。
+    // 深度上限已经让它不该发生，但这里是**渲染的最后一层关口**：
+    // 宁可直接退回原文，也不能让整条消息把整个进程带走。
+    return try {
+        val parser = LatexParser(source)
+        val fx = parser.parseAll()
+        val rendered = MathRenderer(style).render(fx, source)
+        // 撞了深度上限就标成 degraded：这条公式只渲染了一截，
+        // 用户有权知道那不是模型写的、是解析器放弃了。
+        if (parser.hitDepthLimit && !rendered.degraded) {
+            MathExpression(rendered.text, rendered.parts, true, rendered.altText)
+        } else {
+            rendered
+        }
+    } catch (e: StackOverflowError) {
+        degraded(source)
+    } catch (e: Throwable) {
+        // OutOfMemoryError 也在这条路上（占位部件按公式长度生成）。
+        degraded(source)
+    }
+}
+
+/** 排不了时的退路：空表达式 + 标成 degraded。调用方看到 [MathExpression.isEmpty] 会显示原文。 */
+private fun degraded(source: String): MathExpression = MathExpression(
+    text = AnnotatedString(source),
+    parts = emptyMap(),
+    degraded = true,
+    altText = source
+)
+
+/** 嵌套深度上限。防的是「互相递归 + 无上限」把栈打爆。 */
+private const val MAX_NEST_DEPTH = 64
+
+/** 单条公式源码的字符上限。超过就不排了，直接显示原文。 */
+private const val MAX_SOURCE_CHARS = 20_000
+
+/**
+ * **只为测试**：解析一段源码，回报实际到达的最大嵌套层数。
+ *
+ * 存在的理由是「量」而不是「看结果」：`"{".repeat(4000)` 的 `degraded` 无论如何
+ * 都是 true（那些 `{` 是认不出的片段），所以任何看结果的断言都不会真的碰到
+ * 深度上限 —— 把上限调大它照样绿。只有「到达了多少层」不可能靠巧合满足。
+ */
+internal fun maxNestingDepthForTest(source: String): Int {
+    val parser = LatexParser(source)
+    parser.parseAll()
+    return parser.maxDepthReached
+}
+
+/** 嵌套深度上限，测试用来对照。只读常量，不参与任何逻辑。 */
+internal const val NEST_DEPTH_LIMIT_FOR_TEST: Int = MAX_NEST_DEPTH
 
 /**
  * 行内数学的入口：把公式追加进已有的 [AnnotatedString.Builder]，
@@ -244,6 +298,41 @@ private val Delimiters = mapOf(
 private class LatexParser(private val source: String) {
     private var i = 0
 
+    /**
+     * 当前嵌套层数。`{`、`\left(`、`\frac` 的参数都会递归进 `parseUntil`，
+     * 而 `parseUntil → parseAtom → parseUntil` 是**互相递归**。
+     *
+     * 以前这里**没有任何深度上限**，于是 `"{".repeat(4000)` 就能把栈打爆 ——
+     * `StackOverflowError` 从 `@Composable` 里的 `remember {}` 抛出去，进程直接死，
+     * 而且**外层接不住**（它是 Error 不是 Exception，`catch (e: Exception)` 抓不到）。
+     *
+     * 实测（JVM，~984KB 栈）：3000–6600 个 `{` 就炸。ART 主线程栈 1MB，同一个量级。
+     * 一个输入字符换两层栈帧，所以 `{` 是最便宜的形式。
+     *
+     * 3000 个花括号不算病态输入 —— 模型写出没配对的长公式是常事。
+     */
+    private var depth = 0
+
+    /**
+     * 有没有撞上深度上限。撞上了就说明这条公式**只渲染了一部分** ——
+     * UI 应当知道，因为那不是模型写的，是解析器放弃了的。
+     */
+    var hitDepthLimit: Boolean = false
+        private set
+
+    /**
+     * 本次解析实际到达过的最大嵌套层数。
+     *
+     * **只为测试存在。** 断言「最大层数 ≤ 上限」是唯一一条**不可能靠巧合通过**
+     * 的检查：把上限调大或者整个去掉，它立刻变红。
+     *
+     * 之前那两条断言（看 `degraded`、看 `parts`）都是假保证 ——
+     * `"{".repeat(4000)` 里的 `{` 本身是「认不出的片段」，所以
+     * `degraded` 无论如何都是 true，断言从头到尾没碰过深度上限。
+     */
+    var maxDepthReached: Int = 0
+        private set
+
     fun parseAll(): Fx = Fx.Row(parseUntil(null))
 
     /**
@@ -254,19 +343,43 @@ private class LatexParser(private val source: String) {
      *
      * 没等到闭合括号也不抛异常：里面已经解析出的内容照常保留，
      * 缺的右括号用户看不出来，总比整段变空白强。
+     *
+     * **超过 [MAX_NEST_DEPTH] 就停**：不再往里递归，把已经解析出的部分返回。
+     * 这是降级不是报错 —— 用户看到「公式右边少了一截」，而不是进程死掉。
+     * 上限之内的一切行为和以前完全一样。
      */
     private fun parseUntil(stop: Char?, keepSpaces: Boolean = false): List<Fx> {
-        val out = ArrayList<Fx>()
-        while (i < source.length) {
-            val c = source[i]
-            if (stop != null && c == stop) {
+        if (depth >= MAX_NEST_DEPTH) {
+            hitDepthLimit = true
+            // 太深：把剩下的字符吃掉再返回空。**必须吃掉** —— 不吃的话
+            // 调用方的 while 会发现游标没动，那就是死循环。
+            while (i < source.length) {
+                val c = source[i]
+                if (stop != null && c == stop) {
+                    i++
+                    return emptyList()
+                }
                 i++
-                return out
             }
-            val atom = parseAtom(keepSpaces)
-            if (atom != null) out.add(attachScripts(atom))
+            return emptyList()
         }
-        return out
+        depth++
+        if (depth > maxDepthReached) maxDepthReached = depth
+        try {
+            val out = ArrayList<Fx>()
+            while (i < source.length) {
+                val c = source[i]
+                if (stop != null && c == stop) {
+                    i++
+                    return out
+                }
+                val atom = parseAtom(keepSpaces)
+                if (atom != null) out.add(attachScripts(atom))
+            }
+            return out
+        } finally {
+            depth--
+        }
     }
 
     private fun parseAtom(keepSpaces: Boolean = false): Fx? {

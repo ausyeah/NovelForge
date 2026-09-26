@@ -469,8 +469,19 @@ class LatexMathTest {
         assertFalse(e.text.text.isBlank())
     }
 
+    /**
+     * 30 层嵌套分数能正常解析。
+     *
+     * **这条原来叫 `deeplyNestedFractions_doNotStackOverflow` —— 那是假保证。**
+     * 它只测到 30 层，而名字宣称的是「不会栈溢出」。崩溃阈值是 3000–6600 层，
+     * 差了两个数量级。更糟的是解析器当时**根本没有深度上限**，所以这个名字
+     * 不只是名不副实，它描述的那个性质当时压根不存在。
+     *
+     * 真正的护栏是 [LatexCrashSafetyTest]，它直接量「实际到达的最大层数」并
+     * 断言它 ≤ 64。这里只保留「浅层嵌套确实能解析」这一半。
+     */
     @Test(timeout = 20_000L)
-    fun deeplyNestedFractions_doNotStackOverflow() {
+    fun nestedFractionsUpTo30LevelsParse() {
         var source = "x"
         repeat(30) { source = latex("frac{1}{$source}") }
         val e = expr(source)

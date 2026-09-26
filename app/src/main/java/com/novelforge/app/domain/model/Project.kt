@@ -14,7 +14,9 @@ enum class ProjectStatus {
 /** UI 展示用中文名；枚举名只留给存储层 */
 fun ProjectStatus.label(): String = when (this) {
     ProjectStatus.DRAFT -> "筹备中"
-    ProjectStatus.OUTLINING -> "搭建大纲中"
+    // 「生成大纲中」而不是「搭建大纲中」：其余六处界面都写「生成大纲」，
+    // 只有这里换了动词，同一件事两种说法
+    ProjectStatus.OUTLINING -> "生成大纲中"
     ProjectStatus.WRITING -> "连载中"
     ProjectStatus.COMPLETED -> "已完结"
     ProjectStatus.ARCHIVED -> "已归档"

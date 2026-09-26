@@ -163,7 +163,7 @@ fun ExportsScreen(onBack: () -> Unit) {
                     context.contentResolver.openOutputStream(uri)?.use { stream ->
                         app.backupStore.export(target.id, stream)
                     } ?: error("无法写入所选文件")
-                    "已导出《${target.title}》完整备份（大纲 + 全部正文）"
+                    "已导出《${target.title}》的完整备份（大纲 + 全部正文）"
                 }.getOrElse { "导出失败：${it.message}" }
             }
         }
@@ -176,7 +176,7 @@ fun ExportsScreen(onBack: () -> Unit) {
                 backupMessage = runCatching {
                     val imported = context.contentResolver.openInputStream(uri)
                         ?.use { app.backupStore.import(it) } ?: error("无法读取所选文件")
-                    "已导入为新书《${imported.title}》，回书架或项目列表可见"
+                    "已导入为小说《${imported.title}》，可在书架中查看"
                 }.getOrElse { "导入失败：${it.message}" }
             }
         }
@@ -207,9 +207,9 @@ fun ExportsScreen(onBack: () -> Unit) {
                         .padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("整书备份（JSON）", style = MaterialTheme.typography.titleMedium)
+                    Text("小说完整备份（JSON）", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "备份包含项目设定、全部大纲版本和全部正文修订，可换机/重装后导入恢复；不含 API Key。",
+                        "备份包含小说设定、全部大纲版本和全部正文修订，可用于换机或重装后导入恢复；不含 API Key。",
                         style = MaterialTheme.typography.bodySmall
                     )
                     backupMessage?.let {
@@ -231,7 +231,7 @@ fun ExportsScreen(onBack: () -> Unit) {
             if (pickBackupProject) {
                 AlertDialog(
                     onDismissRequest = { pickBackupProject = false },
-                    title = { Text("选择要导出的书") },
+                    title = { Text("选择要备份的小说") },
                     text = {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             projects.forEach { project ->

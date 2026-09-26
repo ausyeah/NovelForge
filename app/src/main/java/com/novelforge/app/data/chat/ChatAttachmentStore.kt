@@ -43,7 +43,7 @@ class ChatAttachmentStore(private val context: Context) {
         withContext(Dispatchers.IO) {
             runCatching {
                 val decoded = decodeSampledBitmap(context, uri)
-                    ?: error("这张图片没有读出来，换一张试试")
+                    ?: error("无法读取该图片，文件可能已损坏")
                 val scaled = downscale(decoded, MAX_EDGE)
                 if (scaled !== decoded) decoded.recycle()
                 val bytes = compressJpeg(scaled, MAX_IMAGE_BYTES)
@@ -74,8 +74,8 @@ class ChatAttachmentStore(private val context: Context) {
                 if (text.isBlank()) error("这个文件是空的")
                 if (text.length > MAX_DOCUMENT_CHARS) {
                     error(
-                        "文件太长了（${text.length} 字），上限 ${MAX_DOCUMENT_CHARS} 字。" +
-                            "拆一部分再发，或者只贴需要的段落。"
+                        "文件过长：共 ${text.length} 字，本次最多发送 ${MAX_DOCUMENT_CHARS} 字。" +
+                            "请改发摘要，或拆分成更小的片段。"
                     )
                 }
                 // 文档也落盘：历史里内联 10 万字进 DataStore 一样会把主线程拖死

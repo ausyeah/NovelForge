@@ -249,8 +249,8 @@ class GenerationRuntime(
                         stalled.copy(
                             status = GenerationJobStatus.NEEDS_USER,
                             errorMessage = "这一章已连续失败 $attempts 次，自动续写已停止。" +
-                                "请在章节页点「重试这一章」单独再试；若总是报空内容，多半是模型思考烧光了额度，" +
-                                "请在模型设置里开启「关闭思考」或加大输出预算。",
+                                "请在章节页点「重试这一章」单独再试；若总是报空内容，多半是思考过程耗尽了输出额度，" +
+                                "请在模型设置中开启「关闭思考模式」或提高输出预算。",
                             updatedAt = now()
                         )
                     )
@@ -425,7 +425,14 @@ class GenerationRuntime(
                 val targetId = job.targetId ?: return "正在生成本章正文"
                 val chapter = outlineRepository.latest(job.projectId)?.chapters
                     ?.firstOrNull { it.id == targetId }
-                chapter?.let { "正在写 ${com.novelforge.app.presentation.common.chapterLabel(it.orderIndex)}《${it.title}》正文" }
+                // 「正在生成」而不是「正在写」：同一函数的上一行和下一行都写
+                // 「正在生成本章正文」，一件事两种说法。也不要写成
+                // 「正在写 ${chapterLabel(...)}」—— chapterLabel 返回的
+                // 「第 3 章」本身没有前导空格，那样会渲染成「正在写 第 3 章」。
+                chapter?.let {
+                    "正在生成${com.novelforge.app.presentation.common.chapterLabel(it.orderIndex)}" +
+                        "《${it.title}》的正文"
+                }
                     ?: "正在生成本章正文"
             }
             GenerationPurpose.OUTLINE -> "正在生成下一批大纲"
@@ -969,7 +976,9 @@ class GenerationRuntime(
                         status = GenerationJobStatus.NEEDS_USER,
                         partialContent = preserved,
                         errorType = "INVALID_JSON",
-                        errorMessage = "${com.novelforge.app.presentation.common.chapterLabel(progress.currentChapterNumber - 1)} 大纲未通过结构校验：${parsed.reason}。请点击“修复”手动修改，或点击“重试”重新生成",
+                        // 用「」而不是弯引号“”：全 App 的用户可见文案里，
+                        // 引用界面上的按钮名一律用「」，只有这两行是例外。
+                        errorMessage = "${com.novelforge.app.presentation.common.chapterLabel(progress.currentChapterNumber - 1)} 大纲未通过结构校验：${parsed.reason}。请点击「修复」手动修改，或点击「重试」重新生成",
                         updatedAt = now()
                     ),
                     call
@@ -995,7 +1004,8 @@ class GenerationRuntime(
                             status = GenerationJobStatus.NEEDS_USER,
                             partialContent = checkpointContent(progress.canonicalContent, completed.content),
                             errorType = "EMPTY_BATCH",
-                            errorMessage = "本批大纲没有返回可用的推进段，请点“重试”或“修复”",
+                            // 「推进段」是提示词里的内部说法，界面上其他地方一律叫「章」
+                            errorMessage = "本批大纲没有返回可用章节，请点「重试」或「修复」",
                             updatedAt = now()
                         ),
                         call
@@ -1075,7 +1085,7 @@ class GenerationRuntime(
             finalJob.copy(
                 status = GenerationJobStatus.NEEDS_USER,
                 errorType = "INVALID_JSON",
-                errorMessage = "模型输出未通过结构校验：${artifactResult.reason ?: "未返回完整内容"}。请点击“修复”手动修改，或点击“重试”重新生成",
+                errorMessage = "模型输出未通过结构校验：${artifactResult.reason ?: "未返回完整内容"}。请点击「修复」手动修改，或点击「重试」重新生成",
                 updatedAt = now()
             )
         }

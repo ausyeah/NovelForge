@@ -297,9 +297,9 @@ private fun StoryBibleEditor(
                         Text(fact.statement, style = MaterialTheme.typography.bodyMedium)
                         Text(
                             when (fact.kind) {
-                                "thread" -> "模型觉得这是一条新伏笔"
-                                "resolved" -> "模型觉得这条线索已经收了"
-                                else -> "模型觉得这是后文要记住的事实"
+                                "thread" -> "模型判定：新伏笔"
+                                "resolved" -> "模型判定：已收束的线索"
+                                else -> "模型判定：需要记录的事实"
                             },
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -308,7 +308,7 @@ private fun StoryBibleEditor(
                             TextButton(onClick = { viewModel.accept(fact, "fact") }) { Text("记成事实") }
                             TextButton(onClick = { viewModel.accept(fact, "thread") }) { Text("记成伏笔") }
                             TextButton(onClick = { viewModel.accept(fact, "resolved") }) { Text("已解决") }
-                            TextButton(onClick = { viewModel.discard(fact) }) { Text("丢掉") }
+                            TextButton(onClick = { viewModel.discard(fact) }) { Text("忽略") }
                         }
                     }
                 }
@@ -320,7 +320,7 @@ private fun StoryBibleEditor(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 TextButton(onClick = { viewModel.acceptAllPending("fact") }) { Text("全部记成事实") }
-                TextButton(onClick = { viewModel.discardAllPending() }) { Text("全部丢掉") }
+                TextButton(onClick = { viewModel.discardAllPending() }) { Text("全部忽略") }
             }
         }
         if (state.factsWithSources.isNotEmpty()) {
@@ -352,8 +352,8 @@ private fun StoryBibleEditor(
         Text("不能违反的规则", style = MaterialTheme.typography.titleSmall)
         if (state.worldRules.size > MemorySelector.MAX_RULES) {
             Text(
-                "有 ${state.worldRules.size} 条，每章只带 ${MemorySelector.MAX_RULES} 条，" +
-                    "本章用不上的会被落选。建议拆成几本书或合并。",
+                "有 ${state.worldRules.size} 条，每章最多携带 ${MemorySelector.MAX_RULES} 条，" +
+                    "本章用不到的会被舍弃。建议合并同类规则。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -440,7 +440,7 @@ private fun CharacterEditor(
                     )
                 },
                 label = { Text("别名 / 称号（顿号分隔）") },
-                supportingText = { Text("本章概要里出现别名也算点名，否则带不回这个角色") },
+                supportingText = { Text("别名在概要中出现时同样视为点名，否则该角色不会被带入本章。") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -466,7 +466,7 @@ private fun CharacterEditor(
                 value = character.abilities,
                 onValueChange = { onChange(character.copy(abilities = it)) },
                 label = { Text("当前状态 / 能力限制") },
-                supportingText = { Text("受伤、失去的东西写这里，它会随角色档案一起发给模型") },
+                supportingText = { Text("在此填写受伤或已失去的事物；内容会随角色档案一并发送给模型。") },
                 modifier = Modifier.fillMaxWidth()
             )
             TextButton(onClick = onDelete) { Text("删除这个角色") }

@@ -311,10 +311,13 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                         onBack = { navController.popBackStack() }
                     )
                     error != null -> com.novelforge.app.presentation.common.PaperMessage(
-                        text = "项目没有打开",
+                        // 「无法打开该小说」而不是「项目没有打开」：主语是项目、
+                        // 谓语是"没有打开"，语法上不通；而且界面上没有"项目"
+                        // 这个东西，全 App 一律叫小说
+                        text = "无法打开该小说",
                         detail = error
                     )
-                    else -> com.novelforge.app.presentation.common.PaperMessage(text = "正在加载项目…")
+                    else -> com.novelforge.app.presentation.common.PaperMessage(text = "正在加载小说…")
                 }
             }
 
@@ -507,7 +510,9 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                 }
                                 application.startActivity(
-                                    Intent.createChooser(send, "分享小说 TXT")
+                                    // 分享对话框的标题只说格式：目标就是 TXT 文件本身，说「分享小说 TXT」
+        // 容易被理解成在分享整本小说。同一文件里另外两处也都写「分享 TXT」。
+        Intent.createChooser(send, "分享 TXT")
                                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                                 )
                             }

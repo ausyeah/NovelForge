@@ -33,16 +33,16 @@ fun CreateProjectScreen(
             .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        PaperTopBar(title = "新的作品", subtitle = "先起名，下一步再定题材", onBack = onCancel)
+        PaperTopBar(title = "新建小说", subtitle = "先填写名称，题材可在下一步设置", onBack = onCancel)
         Text(
-            "名字可以之后再改。题材、主角和核心冲突不在这一步填写。",
+            "名称可在创建后修改。题材、主角与核心冲突不在此步骤填写。",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
         OutlinedTextField(
             value = title,
             onValueChange = { title = it },
-            label = { Text("作品名") },
+            label = { Text("小说名") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )

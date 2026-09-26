@@ -54,6 +54,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -521,7 +523,7 @@ fun LibraryScreen(
         coverBusy = true
         viewModel.setImageCover(target.id, uri) { ok ->
             coverBusy = false
-            coverMessage = if (ok) "封面换好了" else "这张图片没读出来，换一张试试"
+            coverMessage = if (ok) "封面已更新" else "无法读取该图片，请重新选择"
         }
     }
     LaunchedEffect(projects.map { it.id }) {
@@ -661,8 +663,16 @@ fun LibraryScreen(
                     subtitle = "已生成 $generated/${current.chapters.size} 章",
                     onBack = { viewModel.close() },
                     trailing = {
-                        TextButton(onClick = { dirReverse = !dirReverse }) {
-                            Text(if (dirReverse) "倒序" else "正序")
+                        TextButton(
+                            onClick = { dirReverse = !dirReverse },
+                            // 与大纲页同一种写法：「排序：」前缀让标签读起来是
+                            // **状态**而不是动作，光写「↑ 正序」会被理解成
+                            // "点了就变正序"，而它其实显示的就是正序。
+                            modifier = Modifier.semantics {
+                                stateDescription = if (dirReverse) "当前为倒序" else "当前为正序"
+                            }
+                        ) {
+                            Text(if (dirReverse) "排序：↓ 倒序" else "排序：↑ 正序")
                         }
                     }
                 )
@@ -686,7 +696,7 @@ fun LibraryScreen(
                 }
                 if (current.chapters.isEmpty()) {
                     Text(
-                        "还没有大纲。回到作品里生成后再来读。",
+                        "尚未生成大纲。请先在小说内生成大纲，再返回阅读。",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -729,14 +739,14 @@ fun LibraryScreen(
             projects.isEmpty() -> {
                 PaperTopBar(title = "书架", onBack = onBack)
                 Text(
-                    "还没有作品。先起一个名字，题材和大纲可以下一步再定。",
+                    "还没有小说。请先填写名称，题材与大纲可在下一步设置。",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 // 这里原来写的是「先回主页新建一本」—— 主页已经没了，
                 // 等于把用户支到一个不存在的界面；入口就地放在这里
                 PaperButton(
-                    "写第一本",
+                    "新建小说",
                     onOpenCreate,
                     modifier = Modifier.fillMaxWidth(),
                     accent = true
@@ -745,12 +755,12 @@ fun LibraryScreen(
             else -> {
                 PaperTopBar(
                     title = "书架",
-                    subtitle = "点封面写作，长按可阅读、备份或改名",
+                    subtitle = "点击封面写作，长按可阅读、备份、重命名",
                     onBack = onBack
                 )
                 backupMessage?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall)
-                    TextButton(onClick = { backupMessage = null }) { Text("关闭提示") }
+                    TextButton(onClick = { backupMessage = null }) { Text("关闭") }
                 }
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
@@ -771,7 +781,7 @@ fun LibraryScreen(
                                     verticalArrangement = Arrangement.spacedBy(10.dp)
                                 ) {
                                     Text(
-                                        "继续写",
+                                        "继续写作",
                                         style = MaterialTheme.typography.labelMedium,
                                         color = MaterialTheme.colorScheme.primary
                                     )
@@ -794,7 +804,7 @@ fun LibraryScreen(
                                         )
                                     }
                                     PaperButton(
-                                        "继续写《${target.title}》",
+                                        "继续写作《${target.title}》",
                                         onClick = { onContinueWriting(target) },
                                         modifier = Modifier.fillMaxWidth(),
                                         accent = true
@@ -839,7 +849,7 @@ fun LibraryScreen(
                 // 旧「全部项目」页的入口也搬过来：书架现在是唯一的作品列表，
                 // 没有这一本就得空着两个标签页翻
                 PaperButton(
-                    "新建一本",
+                    "新建小说",
                     onOpenCreate,
                     modifier = Modifier.fillMaxWidth()
                 )
@@ -853,7 +863,7 @@ fun LibraryScreen(
             title = { Text("《${target.title}》") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("选择要执行的操作：")
+                    Text("选择操作：")
                     // 前两项是「去干什么」，后三项是「管这本书」。
                     // 写作排第一：单击封面已经进写作界面，这里是显式入口，
                     // 不写的话长按菜单就只剩管理动作，没有出路
@@ -863,7 +873,7 @@ fun LibraryScreen(
                             onContinueWriting(target)
                         },
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text("写这本书") }
+                    ) { Text("继续写作") }
                     Button(
                         onClick = {
                             actionTarget = null
@@ -875,7 +885,7 @@ fun LibraryScreen(
                         backupProjectId = target.id
                         exportLauncher.launch(app.backupStore.suggestedFileName(target.title))
                     }) {
-                        Text("导出整书备份（大纲 + 正文）")
+                        Text("导出整本备份（大纲 + 正文）")
                     }
                     TextButton(onClick = {
                         actionTarget = null
@@ -908,7 +918,7 @@ fun LibraryScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        "挑一个底色，或者用自己的图。",
+                        "选择一种底色，或使用自己的图片。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -952,7 +962,7 @@ fun LibraryScreen(
                         },
                         enabled = !coverBusy,
                         modifier = Modifier.fillMaxWidth()
-                    ) { Text(if (coverBusy) "处理中…" else "从相册选一张") }
+                    ) { Text(if (coverBusy) "处理中…" else "从相册选择") }
                     if (current != BookCover.Default) {
                         TextButton(
                             onClick = { viewModel.resetCover(target.id) },
@@ -979,7 +989,7 @@ fun LibraryScreen(
         AlertDialog(
             onDismissRequest = { chapterAction = null },
             title = { Text("${chapterLabel(chapter.orderIndex)} · ${cleanChapterTitle(chapter.title)}") },
-            text = { Text("《$novelTitle》目录内选择要执行的操作：") },
+            text = { Text("《$novelTitle》· 选择操作：") },
             confirmButton = {
                 TextButton(onClick = {
                     chapterRename = chapter
@@ -1054,7 +1064,7 @@ fun LibraryScreen(
     renameTarget?.let { target ->
         AlertDialog(
             onDismissRequest = { renameTarget = null },
-            title = { Text("重命名作品") },
+            title = { Text("重命名小说") },
             text = {
                 OutlinedTextField(
                     value = renameTitle,
@@ -1082,7 +1092,7 @@ fun LibraryScreen(
     deleteTarget?.let { target ->
         AlertDialog(
             onDismissRequest = { deleteTarget = null },
-            title = { Text("删除作品") },
+            title = { Text("删除小说") },
             text = { Text("确定删除《${target.title}》？其大纲和已生成章节会一并删除，且不可恢复。") },
             confirmButton = {
                 TextButton(onClick = {

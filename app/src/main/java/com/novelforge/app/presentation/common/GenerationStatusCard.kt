@@ -56,7 +56,7 @@ fun GenerationStatusCard(
                 Text(
                     phase ?: when {
                         job?.status == GenerationJobStatus.QUEUED ->
-                            "任务已创建，正在等待生成 worker 启动"
+                            "任务已创建，正在等待生成引擎启动"
                         savedCharacters == 0 && elapsedSeconds < 3 ->
                             "正在连接模型，等待首段响应…"
                         savedCharacters == 0 && elapsedSeconds < 20 ->

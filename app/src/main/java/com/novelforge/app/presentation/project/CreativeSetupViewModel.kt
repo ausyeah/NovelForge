@@ -34,10 +34,10 @@ internal fun validateCreativeSetup(config: CreativeConfig, questData: QuestData)
         return "请至少选择一个题材标签"
     }
     if (config.writingStyle == WritingStyle.CUSTOM && config.customWritingStyle?.trim().isNullOrBlank()) {
-        return "请填写自定义文笔风格"
+        return "请填写自定义叙事风格"
     }
     if (config.tone == Tone.CUSTOM && config.customTone?.trim().isNullOrBlank()) {
-        return "请填写自定义笔风类型"
+        return "请填写自定义基调"
     }
     if (
         config.thrillFrequency == ThrillFrequency.CUSTOM &&

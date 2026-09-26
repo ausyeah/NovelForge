@@ -38,7 +38,7 @@ import com.novelforge.app.domain.model.WritingStyle
 
 private val genreOptions = listOf("玄幻", "都市", "悬疑", "科幻", "历史", "言情", "现实", "奇幻")
 private val styleOptions = listOf(
-    WritingStyle.LITERARY to "文青",
+    WritingStyle.LITERARY to "文艺",
     WritingStyle.ACCESSIBLE to "通俗",
     WritingStyle.CLASSICAL to "古典",
     WritingStyle.WEB_NOVEL to "网文风",
@@ -173,7 +173,7 @@ fun CreativeSetupScreen(
             onBack = onBack
         )
         Text(
-            "带 * 的项目必须完成，未完成前不会创建大纲。",
+            "标有 * 的项为必填，未完成前无法生成大纲。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -230,7 +230,7 @@ fun CreativeSetupScreen(
                 enabled = customGenre.trim().isNotBlank()
             ) { Text("添加") }
         }
-        ChoiceSection("* 文笔风格") {
+        ChoiceSection("* 叙事风格") {
             styleOptions.forEach { (value, label) ->
                 SelectChip(label, writingStyle == value) { writingStyle = value }
             }
@@ -239,17 +239,17 @@ fun CreativeSetupScreen(
             OutlinedTextField(
                 value = customWritingStyle,
                 onValueChange = { customWritingStyle = it },
-                label = { Text("自定义文笔风格") },
+                label = { Text("自定义叙事风格") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
         }
         IntensitySlider(
-            title = "文笔风格强度",
+            title = "叙事风格强度",
             value = writingStyleIntensity,
             onValueChange = { writingStyleIntensity = it }
         )
-        ChoiceSection("* 笔风类型") {
+        ChoiceSection("* 基调") {
             toneOptions.forEach { (value, label) ->
                 SelectChip(label, tone == value) { tone = value }
             }
@@ -258,13 +258,13 @@ fun CreativeSetupScreen(
             OutlinedTextField(
                 value = customTone,
                 onValueChange = { customTone = it },
-                label = { Text("自定义笔风类型") },
+                label = { Text("自定义基调") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
         }
         IntensitySlider(
-            title = "笔风强度",
+            title = "基调节奏",
             value = toneIntensity,
             onValueChange = { toneIntensity = it }
         )
@@ -298,7 +298,7 @@ fun CreativeSetupScreen(
             OutlinedTextField(
                 value = customChapterCount,
                 onValueChange = { customChapterCount = it.filter(Char::isDigit) },
-                label = { Text("自定义章节数（$MIN_CHAPTER_COUNT-$MAX_CHAPTER_COUNT）") },
+                label = { Text("自定义章节数（$MIN_CHAPTER_COUNT–$MAX_CHAPTER_COUNT）") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
@@ -317,25 +317,16 @@ fun CreativeSetupScreen(
             OutlinedTextField(
                 value = customTargetLength,
                 onValueChange = { customTargetLength = it.filter(Char::isDigit) },
-                label = { Text("自定义每章字数（500-10000）") },
+                label = { Text("自定义每章字数（500–10000）") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
         }
 
-        if (selectedTargetLength > 8_000) {
-            Text(
-                "单章超过 8000 字会明显增加生成时间、失败概率和模型额度消耗，建议控制在 2000-8000 字。",
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        }
         Text(
-            "根据模型能力不同选择合适单章文本长度，建议低于 4000 字。",
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Text(
-            "长篇提示：章节越多，需要的模型输出额度越高；如果返回不完整，可提高模型设置中的输出预算后重试。",
+            "单章字数越高，生成耗时、失败概率与额度消耗越高，建议 2000–4000 字。" +
+                "章节数越多，所需输出额度越高；若生成结果不完整，可提高模型设置中的输出预算后重试。",
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
 

@@ -47,7 +47,7 @@ fun AgentAssistCard(
     ) {
         Text("问问这本书", style = MaterialTheme.typography.titleSmall)
         Text(
-            "一次提问。带上大纲和相关片段，不发送全文。",
+            "每次提问会附带大纲与相关片段，不会发送全文。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -74,12 +74,12 @@ fun AgentAssistCard(
             value = input,
             onValueChange = { input = it },
             modifier = Modifier.fillMaxWidth(),
-            label = { Text("想查什么") },
+            label = { Text("输入你的问题") },
             singleLine = true,
             enabled = !busy
         )
         PaperButton(
-            if (busy) "正在查…" else "开始查",
+            if (busy) "查询中…" else "提交提问",
             onClick = { onAsk(input) },
             enabled = !busy && input.isNotBlank(),
             modifier = Modifier.fillMaxWidth(),

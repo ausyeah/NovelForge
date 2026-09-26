@@ -159,8 +159,8 @@ class GenerateOutlineUseCase(
                     ${prologueNote}这是后续生成正文时使用的故事资料；每个推进段说明该章故事如何发展、冲突如何变化、人物或局势发生什么变化，并为下一章留下方向。
                     全书计划共 $chapterCount 章；本批只生成这 $batchCount 个推进段并按章节顺序排列，严禁生成批次之外的章节、完整故事线或正文。
                     【创作设定】
-                    - 文笔风格：${creativeConfig.writingStylePromptLabel()}（强度 ${creativeConfig.writingStyleIntensity}/5）
-                    - 笔风类型：${creativeConfig.tonePromptLabel()}（强度 ${creativeConfig.toneIntensity}/5）
+                    - 叙事风格：${creativeConfig.writingStylePromptLabel()}（强度 ${creativeConfig.writingStyleIntensity}/5）
+                    - 基调：${creativeConfig.tonePromptLabel()}（强度 ${creativeConfig.toneIntensity}/5）
                     - 爽感频率：${creativeConfig.thrillFrequencyPromptLabel()}
                     - 题材标签：$genreTags
                     - 每章正文目标长度：${creativeConfig.targetLength} 字（这里只写大纲，不写正文）

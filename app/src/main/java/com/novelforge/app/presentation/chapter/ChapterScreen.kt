@@ -127,7 +127,7 @@ fun ChapterScreen(
         )
         if (chapter == null) {
             Text(
-                "先回到大纲，生成并确认章节后再来写正文。",
+                "请先回到大纲生成并确认章节，再进入正文写作。",
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             return
@@ -404,10 +404,10 @@ private fun MemoryStrip(
             append("、$includedThreads/${threads.size} 条伏笔")
             append("、$factCount 条已确认事实")
             if (overBudget > 0) {
-                append("。另有 $overBudget 条这次名额不够没带")
+                append("。另有 $overBudget 条因超出本场记忆上限未包含")
                 append("（其中规则 $omittedRules 条）")
             }
-            append("。点一下可以先不带。")
+            append("。点击名称即可在本章中排除。")
         },
         style = MaterialTheme.typography.bodySmall,
         color = if (overBudget > 0) {
@@ -438,7 +438,7 @@ private fun MemoryStrip(
         }
     }
     if (pendingCount > 0) {
-        TextButton(onClick = onOpenMemory) { Text("$pendingCount 条新记忆还没确认") }
+        TextButton(onClick = onOpenMemory) { Text("$pendingCount 条新记忆待确认") }
     } else {
         TextButton(onClick = onOpenMemory) { Text("整理本书记忆") }
     }

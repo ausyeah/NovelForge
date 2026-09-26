@@ -46,6 +46,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -126,7 +127,7 @@ fun OutlineScreen(
     ) {
         plannedChapterCount?.let { total ->
             val currentChapter = chapterLabel(savedChapterCount)
-            "正在生成本批大纲（$currentChapter 起） · 已生成 $savedChapterCount/$total 段"
+            "正在生成本批大纲（$currentChapter 起） · 已生成 $savedChapterCount/$total 章"
         }
     } else {
         null
@@ -367,8 +368,16 @@ fun OutlineScreen(
                             "版本 ${outline.version} · 共 ${draftItems.size} 章 · 点章节可编辑详情",
                             modifier = Modifier.weight(1f)
                         )
-                        TextButton(onClick = viewModel::toggleReverseOrder) {
-                            Text(if (reverseOrder) "↓ 倒序中" else "↑ 正序中")
+                        TextButton(
+                            onClick = viewModel::toggleReverseOrder,
+                            // 「排序：」前缀不是凑字数：光写「↑ 正序」读起来像
+                            // *动作*（点了会变正序），而它其实显示的是**当前状态**。
+                            // 两个界面（大纲/书架）用同一种写法。
+                            modifier = Modifier.semantics {
+                                stateDescription = if (reverseOrder) "当前为倒序" else "当前为正序"
+                            }
+                        ) {
+                            Text(if (reverseOrder) "排序：↓ 倒序" else "排序：↑ 正序")
                         }
                     }
                     if (hasUnsavedEdits) {
@@ -465,7 +474,7 @@ fun OutlineScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 20.dp)
             ) {
-                Text("就这本书聊设定")
+                Text("就这本书提问")
             }
             Text(
                 "《${projectTitle}》",
@@ -491,8 +500,8 @@ fun OutlineScreen(
             text = {
                 Text(
                     (draftExit as? DraftExit.Failed)?.reason
-                        ?: "直接返回会丢掉刚才在大纲里改的标题和概要。已经写好的正文不受影响，" +
-                        "丢掉的只是这批大纲改动。"
+                        ?: "直接返回会丢失刚才在大纲里修改的标题和概要。已经写好的正文不受影响，" +
+                        "未保存的仅限这批大纲改动。"
                 )
             },
             confirmButton = {
@@ -589,7 +598,7 @@ private fun AutoRunControls(
     ) {
         Switch(checked = autoRun, onCheckedChange = onToggleAutoRun)
         Text(
-            "无人值守持续生成：关掉应用也会继续写，进度自动保存",
+            "无人值守持续生成：切换到后台也会继续生成，进度自动保存",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.weight(1f)
@@ -695,7 +704,7 @@ private fun ChapterDetailPane(
         Text("${chapterLabel(item.orderIndex)} ${item.title}", fontWeight = FontWeight.Bold)
         if (locked) {
             Text(
-                "本章已生成正文：改大纲不会自动改正文；觉得写坏了用下方「从此章重生成」连正文一起重写",
+                "本章已生成正文：修改大纲不会自动改正文。如需重写，请用下方「从此章重生成」连同正文一起覆盖。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.primary
             )
@@ -736,10 +745,10 @@ private fun ChapterDetailPane(
             Button(
                 onClick = onWandPrimary,
                 modifier = Modifier.fillMaxWidth()
-            ) { Text(if (canUndo) "↺ 撤回优化" else "✦ 魔法棒优化") }
+            ) { Text(if (canUndo) "↺ 撤销优化" else "✦ 优化本章概要") }
         }
         Text(
-            "编辑翻页：移动的是草稿里的章节位置，和正文页的翻页不是一回事",
+            "此处翻页调整的是大纲中的章节顺序，与正文页的翻页不同",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )

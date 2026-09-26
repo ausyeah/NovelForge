@@ -448,7 +448,7 @@ class ChatViewModel(
             _attachmentNotice.value = null
             attachmentStore.saveImage(uri, displayName)
                 .onSuccess { _pendingAttachments.update { it + it } }
-                .onFailure { _attachmentNotice.value = it.message ?: "这张图加不进来" }
+                .onFailure { _attachmentNotice.value = it.message ?: "无法添加这张图片" }
         }
     }
 
@@ -457,7 +457,7 @@ class ChatViewModel(
             _attachmentNotice.value = null
             attachmentStore.saveDocument(uri, displayName)
                 .onSuccess { _pendingAttachments.update { it + it } }
-                .onFailure { _attachmentNotice.value = it.message ?: "这个文件加不进来" }
+                .onFailure { _attachmentNotice.value = it.message ?: "无法添加这个文件" }
         }
     }
 
@@ -1087,7 +1087,7 @@ fun ChatScreen(
     ) {
         PaperTopBar(
             title = "灵感助手",
-            subtitle = "聊聊设定、段落和走向",
+            subtitle = "设定、段落与情节走向",
             onBack = onBack,
             trailing = {
                 // 思考开关放在顶栏而不是设置页：它是「这段对话要不要我动脑子」，
@@ -1124,7 +1124,7 @@ fun ChatScreen(
         )
         if (!thinkingOn) {
             Text(
-                "思考已关闭：回答更快、更省 token，但看不到推理过程。",
+                "思考已关闭：回答更快、消耗更少，但看不到思考过程。",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -1172,9 +1172,9 @@ fun ChatScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text("灵感卡壳了？聊聊吧", style = MaterialTheme.typography.titleMedium)
+                    Text("还没有灵感？说说你的想法", style = MaterialTheme.typography.titleMedium)
                     Text(
-                        "剧情头脑风暴 · 人物设计 · 设定破局",
+                        "剧情构思 · 人物设计 · 世界观设定",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -1629,7 +1629,7 @@ fun ChatScreen(
             if (pickerMenuOpen) {
                 AlertDialog(
                     onDismissRequest = { pickerMenuOpen = false },
-                    title = { Text("加个附件") },
+                    title = { Text("添加附件") },
                     text = {
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             TextButton(
@@ -1676,7 +1676,7 @@ fun ChatScreen(
                     onValueChange = { input = it },
                     placeholder = {
                         Text(
-                            if (busy) "生成中，可以先想好下一句…" else "聊聊你的故事…",
+                            if (busy) "生成中，可以先想好下一句…" else "写下你的想法…",
                             style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp)
                         )
                     },

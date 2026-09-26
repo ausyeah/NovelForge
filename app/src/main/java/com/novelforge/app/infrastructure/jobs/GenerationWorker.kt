@@ -76,7 +76,7 @@ class GenerationWorker(
         val notification: Notification = NotificationCompat.Builder(context, NovelForgeApplication.GENERATION_CHANNEL_ID)
             .setSmallIcon(context.applicationInfo.icon)
             .setContentTitle("NovelForge 正在生成")
-            .setContentText(currentLabel ?: "AI 正在生成大纲与正文，可离开应用，完成后自动保存")
+            .setContentText(currentLabel ?: "正在生成大纲与正文，可切换到其他应用，完成后自动保存")
             .setOngoing(true)
             .build()
         // 必须三参并声明与清单一致的 dataSync 类型，否则 targetSdk 35 直接崩溃

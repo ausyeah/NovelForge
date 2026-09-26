@@ -93,7 +93,7 @@ fun SettingsScreen(
                 decodeSampledBitmap(context, uri)
             }
             if (decoded == null) {
-                connectionMessage = "这张图片没有读出来，换一张试试"
+                connectionMessage = "图片读取失败，请选择其他图片"
             } else {
                 wallpaperViewModel.openCrop(decoded)
             }
@@ -127,7 +127,7 @@ fun SettingsScreen(
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        PaperTopBar(title = "设置", subtitle = "密钥只存在这台手机上", onBack = onBack)
+        PaperTopBar(title = "设置", subtitle = "模型连接、壁纸与预设配置", onBack = onBack)
         // 账本和备份导出以前是首页上的两个平级磁贴，和「模型设置」摆在一起，
         // 但它们都不是设置项 —— 一个是用量事实，一个是数据搬运。
         // 收进设置当二级页之后，首页只剩「书架 / 灵感 / 设置」三个一级入口。
@@ -230,8 +230,8 @@ fun SettingsScreen(
         }
         Text("已保存的配置", style = MaterialTheme.typography.titleSmall)
         Text(
-            if (presets.isEmpty()) "保存设置时会记住这一套接口。点按拉回来改，长按删除。"
-            else "点按拉回表单再改，改完重新保存。长按删除。同名服务商会自动标成（2）。",
+            if (presets.isEmpty()) "保存设置时会记住这一套连接配置。点按载入表单后修改，长按删除。"
+            else "点按载入表单再修改，改完重新保存。长按删除。同名服务商会自动标记为（2）。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -251,7 +251,7 @@ fun SettingsScreen(
                                 apiKey = preset.apiKey
                                 editingPresetId = preset.id
                                 saved = false
-                                connectionMessage = "已拉回「${preset.label}」，改完点保存"
+                                connectionMessage = "已载入「${preset.label}」，修改后点击保存"
                             },
                             onLongClick = { pendingDelete = preset }
                         )
@@ -271,7 +271,7 @@ fun SettingsScreen(
         OutlinedTextField(
             value = settings.providerName,
             onValueChange = { settings = settings.copy(providerName = it); saved = false },
-            label = { Text("Provider 名称") },
+            label = { Text("服务商名称") },
             modifier = Modifier.fillMaxWidth()
         )
         OutlinedTextField(
@@ -300,7 +300,7 @@ fun SettingsScreen(
                     fetchingModels = false
                     result.onSuccess { list ->
                         models = list
-                        connectionMessage = "拉到 ${list.size} 个模型，点选即填入"
+                        connectionMessage = "已获取 ${list.size} 个模型，点击即可填入"
                     }.onFailure {
                         connectionMessage = "拉取模型列表失败：${userMessage(it)}"
                     }
@@ -313,7 +313,7 @@ fun SettingsScreen(
         }
         models?.let { list ->
             if (list.isEmpty()) {
-                Text("该服务没有返回任何模型", style = MaterialTheme.typography.bodySmall)
+                Text("该服务商没有返回任何模型", style = MaterialTheme.typography.bodySmall)
             } else {
                 // 不能内嵌 verticalScroll：会和页面外层滚动打架，导致整页卡住滑不动
                 Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -363,7 +363,15 @@ fun SettingsScreen(
             )
         }
         Text(
-            "请求会附带 enable_thinking=false 与 thinking.type=disabled，防止思考型模型把输出额度耗尽在思考上；已验证当前服务端支持。若个别服务端报参数错误，可关闭此开关。",
+            if (settings.disableThinking) {
+                "当前已开启：请求会附带 enable_thinking=false 与 thinking.type=disabled，" +
+                    "防止思考型模型把输出额度耗尽在思考上；已验证当前服务端支持。" +
+                    "若个别服务端报参数错误，请关闭此开关。"
+            } else {
+                "当前已关闭：请求不携带思考相关参数。开启后请求会附带" +
+                    "enable_thinking=false 与 thinking.type=disabled，防止思考型模型把输出额度耗尽在思考上；" +
+                    "若个别服务端报参数错误，请保持此开关关闭。"
+            },
             style = MaterialTheme.typography.bodySmall
         )
         Button(
@@ -435,7 +443,7 @@ fun SettingsScreen(
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("删除「${preset.label}」？") },
-            text = { Text("只删除这份保存的接口，当前正在填写的内容还在。") },
+            text = { Text("只删除这条已保存的连接配置，当前填写的表单不受影响。") },
             confirmButton = {
                 TextButton(onClick = {
                     pendingDelete = null
@@ -453,7 +461,10 @@ fun SettingsScreen(
     wallpaperViewModel.publishError?.let { message ->
         AlertDialog(
             onDismissRequest = { wallpaperViewModel.consumePublishError() },
-            title = { Text("壁纸没存上") },
+            // 标题不能和正文开头重复：publishError 本身就是
+            // "壁纸保存失败：<原因>"，标题再写一遍就成了
+            // 「壁纸保存失败 / 壁纸保存失败：xxx」
+            title = { Text("保存壁纸时出错") },
             text = { Text(message) },
             confirmButton = {
                 TextButton(onClick = { wallpaperViewModel.consumePublishError() }) { Text("知道了") }

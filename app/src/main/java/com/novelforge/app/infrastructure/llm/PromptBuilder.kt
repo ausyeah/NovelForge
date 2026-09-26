@@ -38,8 +38,8 @@ class PromptBuilder(
             appendLine("只依据下面给出的设定写作，不要引入不属于这本书的人物、地名、法则或道具。")
         }
         appendLine("【创作偏好】")
-        appendLine("- 文笔风格：${config.writingStylePromptLabel()}，强度 ${config.writingStyleIntensity}/5")
-        appendLine("- 笔风类型：${config.tonePromptLabel()}，强度 ${config.toneIntensity}/5")
+        appendLine("- 叙事风格：${config.writingStylePromptLabel()}，强度 ${config.writingStyleIntensity}/5")
+        appendLine("- 基调：${config.tonePromptLabel()}，强度 ${config.toneIntensity}/5")
         appendLine("- 爽感频率：${config.thrillFrequencyPromptLabel()}")
         appendLine("- 题材标签：${config.genreTags.joinToString("、")}")
         appendLine("【写作规则】")

@@ -96,6 +96,6 @@ class CreativeSetupViewModelTest {
             completeQuestData
         )
 
-        assertEquals("请填写自定义文笔风格", error)
+        assertEquals("请填写自定义叙事风格", error)
     }
 }

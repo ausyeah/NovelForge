@@ -96,6 +96,50 @@ class CoverTapRoutingTest {
     }
 
     /**
+     * 点封面**不许**自动跳进阅读器。
+     *
+     * 用户原话：「没让你点进书自动跳转最近阅读啊，别自作主张」
+     *
+     * 背景：把「点封面 = 继续写」改成「点封面 = 读」的那一轮里，我顺手在封面的
+     * 点击里多接了一句 `pendingReadId = project.id`。于是点一下封面就直接进阅读器，
+     * 而且落在上次读到的那一章 —— 跳过整张目录页。
+     *
+     * 用户只说了「点封面可以阅读」。**「进这本书」和「读上次那一章」是两件事**：
+     * 前者是封面这一下该给的，后者是书内目录顶部「▶ 续读：第 N 章」那个按钮
+     * 明确标着的东西。多做的那一步没人要求，而且跳过了用户想看到的那一层。
+     *
+     * 这条钉住「只有续读按钮能设 `pendingReadId`」。
+     */
+    @Test
+    fun onlyTheExplicitResumeButtonJumpsIntoTheReader() {
+        val code = stripComments(libraryScreen())
+        // 只看赋**非 null** 的地方（`pendingReadId = null` 是清空，不是跳转）
+        val setters = Regex("pendingReadId\\s*=\\s*(?!null)\\S+")
+            .findAll(code)
+            .map { it.value.substringAfter("=").trim() }
+            .toList()
+        assertTrue(
+            "找不到任何设 pendingReadId 的地方 —— 「▶ 续读」按钮失效了？" +
+                "它靠 pendingReadId 落到上次那一章。",
+            setters.isNotEmpty()
+        )
+        assertEquals(
+            "只有「▶ 续读」按钮可以设 pendingReadId，实际有 ${setters.size} 处：$setters。" +
+                "点封面**不许**自动跳进阅读器（用户原话：「别自作主张」）。",
+            1,
+            setters.size
+        )
+        // 唯一那处必须绑在长按菜单/顶部续读用的 `target` 上，
+        // 不许是封面点击用的 `project` —— 后者就是「点封面自动跳」。
+        assertEquals(
+            "唯一那处赋值绑的是 $setters，应该绑 `target`（续读按钮）。" +
+                "绑 `project` 就意味着封面点击会跳进阅读器。",
+            "target.id",
+            setters.first()
+        )
+    }
+
+    /**
      * 顶栏副标题和长按菜单不能还在说旧的手势。
      *
      * 它写着「点击封面写作」而代码已经是点封面阅读 —— 用户按提示做，结果和

@@ -928,12 +928,22 @@ fun LibraryScreen(
                             cover = cover,
                             fallbackColor = fallback,
                             onThumbnail = { viewModel.coverThumbnail(project.id) },
-                            // 点封面 = 读。这本书写过了就去阅读器（落在上次读到的那一章），
-                            // 一次没写过的送去写作 —— 空书进阅读器是一片全「未生成正文」
-                            // 的死胡同，而开始写是所有书的必经一步。
+                            // 点封面 = 读。**只打开这本书的目录**，不自动跳进阅读器。
+                            //
+                            // 这里原来还多接了一句 `pendingReadId = project.id`，
+                            // 于是点封面会直接进阅读器并落在上次读到的那一章。
+                            // 那是我自己加的 —— 用户只说了「点封面可以阅读」，
+                            // 没说要点完就跳：「自作主张」。
+                            //
+                            // 想要「读上次那一章」是另一个动作，书内目录顶部就有
+                            // 「▶ 续读：第 N 章」那个按钮（见下面的 resumeChapter），
+                            // 那才是明确说「续读」的地方。封面这一下给的是
+                            // 「进这本书」，停在目录，要读哪一章由用户选。
+                            //
+                            // 一次都没写过的书仍然送去写作 —— 空书进目录是一片
+                            // 全「未生成正文」的死胡同，而开始写是所有书的必经一步。
                             onClick = {
                                 if (viewModel.tapCoverGoesToReading(viewModel.writtenCount(project.id))) {
-                                    pendingReadId = project.id
                                     viewModel.open(project)
                                 } else {
                                     onContinueWriting(project)

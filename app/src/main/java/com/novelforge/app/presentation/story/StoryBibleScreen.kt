@@ -389,6 +389,19 @@ private fun StoryBibleEditor(
             label = { Text("一行一条") }
         )
         Text("角色", style = MaterialTheme.typography.titleSmall)
+        // 别名怎么匹配、状态栏该写什么，原来各挂在 CharacterEditor 里一个字段的
+        // supportingText 上。而 CharacterEditor 是 characters.forEachIndexed 里的 ——
+        // 十个角色就是同一段说明重复十遍，两处各一次，每张卡多两行。
+        //
+        // 说的也都不是「这个角色怎么样」，而是「这一节的两栏怎么填」，属于整节的说明，
+        // 所以收到节标题下面说一次（和上面「已确认事实」那条一个写法）。
+        // 没有丢信息：别名按字面点名、状态栏会随档案发给模型，这两条都还在。
+        Text(
+            "别名在概要中出现时同样视为点名，否则该角色不会被带入本章；" +
+                "「当前状态 / 能力限制」建议写受伤或已失去的事物，角色档案会随本章一并发送给模型。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
         characters.forEachIndexed { index, character ->
             CharacterEditor(
                 character = character,
@@ -447,7 +460,6 @@ private fun CharacterEditor(
                     )
                 },
                 label = { Text("别名 / 称号（顿号分隔）") },
-                supportingText = { Text("别名在概要中出现时同样视为点名，否则该角色不会被带入本章。") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
@@ -473,7 +485,6 @@ private fun CharacterEditor(
                 value = character.abilities,
                 onValueChange = { onChange(character.copy(abilities = it)) },
                 label = { Text("当前状态 / 能力限制") },
-                supportingText = { Text("在此填写受伤或已失去的事物；内容会随角色档案一并发送给模型。") },
                 modifier = Modifier.fillMaxWidth()
             )
             TextButton(onClick = onDelete) { Text("删除这个角色") }

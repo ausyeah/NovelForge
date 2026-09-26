@@ -1297,7 +1297,20 @@ fun ChatScreen(
                                                 // labelSmall 一行只有 16dp 高，长得跟普通文字一样，
                                                 // 会被当成正文去长按选词，然后发现点不动。
                                                 Text(
-                                                    if (message.streaming) "思考中…" else "已完成思考 · 点击展开/收起",
+                                                    // 原来写「已完成思考 · 点击展开/收起」：后半句是
+                                                    // 一条逐个气泡重复的操作说明，而折叠标签自己就在
+                                                    // 这里、又是可点的 —— 说一遍就够。改成标签自带
+                                                    // 当前状态。顺带修掉原来收着和展开着都念
+                                                    // 「展开/收起」：那个文案根本不区分这两种状态。
+                                                    //
+                                                    // 注意和下面那个「展开全部」区分开：这两个是嵌套
+                                                    // 的折叠，长思考展开时两个同时可见，所以措辞必须
+                                                    // 一个管整块、一个管块内的截断，不能撞车。
+                                                    when {
+                                                        message.streaming -> "思考中…"
+                                                        reasoningOpen -> "收起思考 ↑"
+                                                        else -> "展开思考 ↓"
+                                                    },
                                                     style = MaterialTheme.typography.labelSmall,
                                                     color = MaterialTheme.colorScheme.primary,
                                                     fontWeight = FontWeight.Bold,
@@ -1333,7 +1346,11 @@ fun ChatScreen(
                                                     )
                                                     if (reasoningLong) {
                                                         Text(
-                                                            if (reasoningFull) "收起思考 ↑" else "展开全部 ↓",
+                                                            // 「全部」而不是「思考」：上面那个折叠已经管
+                                                            // 整块思考了，这里管的是块内被截断的那一段。
+                                                            // 长思考时两个标签同时可见，措辞撞车会让人
+                                                            // 以为按了没反应。
+                                                            if (reasoningFull) "收起全部 ↑" else "展开全部 ↓",
                                                             style = MaterialTheme.typography.labelSmall,
                                                             color = MaterialTheme.colorScheme.primary,
                                                             modifier = Modifier

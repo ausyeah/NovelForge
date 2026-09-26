@@ -51,6 +51,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
@@ -233,6 +234,23 @@ class ChatViewModel(
         if (frozen == value) return
         frozen = value
         if (!frozen) flushPending()
+    }
+
+    /**
+     * 用户刚点了发送 —— **强制解冻并回到跟随状态**。
+     *
+     * 原来只有 `setFrozen(!atBottom || …)` 那一条路，而它由界面的 `atBottom` 驱动。
+     * 于是「你翻上去看历史 → 打了一句话发出去」这个最常见的组合会这样：
+     *   - 发送时 `atBottom` 仍是 false（上一次翻上去留下的）
+     *   - `scrollToItem(0)` 把位置搬到底部，但那是**这一帧之后**才发生的
+     *   - `atBottom` 要等下一次重组才变 true，而 `frozen` 在此期间还是 true
+     *   - 冻着的时候流式增量只进缓冲不落进列表 → **看起来就是「没跟随」**
+     *
+     * 而「我发了话，当然要从我这句话看起」是唯一没有例外的情形：刚发出去的人
+     * 不可能想在旧位置上等回复。
+     */
+    fun onUserSent() {
+        frozen = false
     }
 
     /** 解冻：节流窗口里攒下的增量一次性落账（最多也就几十毫秒的 token） */
@@ -1152,10 +1170,24 @@ fun ChatScreen(
     }
     // 仅在用户发出新消息的瞬间跳到底部（令牌流期间绝不主动滚动）
     val lastRole = messages.lastOrNull()?.role
-    LaunchedEffect(messages.size, lastRole) {
-        if (messages.isNotEmpty() && lastRole == ChatRole.USER) {
+    // 「刚发了话」用一个递增的序号来认，而不是靠 messages.size。
+    //
+    // 原来这个 effect 挂在 messages.size 上，但**发出去的那一刻** size 还没变：
+    // ViewModel 是先 append USER + 空的 ASSISTANT 才返回，而那一 append 和
+    // scrollToItem 之间隔着一次重组。冻着的时候那次 scrollToItem 打进了
+    // 一个「列表还不接受新项」的状态，命令被丢掉 —— 于是「发了话不跟随」。
+    //
+    // 现在由发送按钮直接调 onUserSent()：先解冻（onUserSent），再由这个
+    // effect 在**下一个**帧滚到底。两步都在发送那一刻发生，不再依赖 size 的时序。
+    var sendSeq by remember { mutableIntStateOf(0) }
+    LaunchedEffect(sendSeq) {
+        if (sendSeq > 0) {
             listState.scrollToItem(0)
         }
+    }
+    // 保留原来那条兜底：切换会话 / 恢复历史时也要到底部
+    LaunchedEffect(activeId) {
+        if (messages.isNotEmpty()) listState.scrollToItem(0)
     }
     // 切换/恢复会话后跳到底部
     LaunchedEffect(activeId, messages.isNotEmpty()) {
@@ -1850,7 +1882,14 @@ fun ChatScreen(
                         } else {
                             val text = input
                             input = ""
+                            // 先解冻，再让界面滚到底 —— 顺序重要。
+                            // 冻着的时候流式增量只进缓冲不落列表，而 scrollToItem
+                            // 打进一个「列表还没接受新项」的状态会被丢掉：
+                            // 结果就是「我发了话，它不往下跟」。
+                            // 「我发了话当然要从我这句话看起」没有例外。
+                            viewModel.onUserSent()
                             viewModel.send(text)
+                            sendSeq++
                         }
                     }
                     // "■/➤" 本身读不出来：这个键到底是"发出去"还是"停下来"必须念出来

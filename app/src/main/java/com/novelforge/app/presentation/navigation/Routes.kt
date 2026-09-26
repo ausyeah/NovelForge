@@ -7,6 +7,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 
 /**
@@ -146,8 +148,21 @@ fun NovelForgeBottomBar(
             NavigationBarItem(
                 selected = current == destination,
                 onClick = { onSelect(destination) },
-                icon = { Text(destination.glyph) },
-                label = { Text(destination.label) },
+                icon = {
+                    // **不传 label**：底部一排只要三个图标，不要文字
+                    // （用户原话：「最下面一排只需要有三个图标就行了，不要文字」）。
+                    //
+                    // 文字拿掉之后无障碍读屏就听不出这是哪一栏了 —— `▤` / `✎` / `⚙`
+                    // 对 TalkBack 来说是没有意义的符号。所以 label 字符串从可见文本
+                    // 降级成 contentDescription，**内容一个字没少，只是不再画出来**。
+                    Text(
+                        text = destination.glyph,
+                        modifier = Modifier.semantics {
+                            contentDescription = destination.label
+                        }
+                    )
+                },
+                label = null,
                 modifier = Modifier.padding(vertical = 0.dp)
             )
         }

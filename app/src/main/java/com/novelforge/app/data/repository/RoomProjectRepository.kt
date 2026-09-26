@@ -24,6 +24,22 @@ class RoomProjectRepository(private val database: AppDatabase) : ProjectReposito
 
     override suspend fun getProject(id: String): Project? = dao.findById(id)?.toDomain()
 
+    /**
+     * 走 chapterRevisionDao 而不是 chapterDao：`Project` 表里没有正文信息。
+     *
+     * `orFallback` 是必须的：这张表对新装的应用是空的（还没有任何章节），
+     * 而查询本身不会报错，只是返回空列表 —— 不加兜底的话书架会崩在一个
+     * 「本该正常」的状态上。
+     */
+    override fun observeWrittenChapterCounts(): Flow<Map<String, Int>> =
+        database.chapterRevisionDao().observeWrittenCountsByProject()
+            // 合并逻辑放在 LibraryRouting 而不是这里 inline：ViewModel 也用同一份，
+            // 两处各写一遍 `associate` 的话，聚合规则（多行取 max 而不是覆盖）
+            // 迟早会只改一边。
+            .map { rows -> com.novelforge.app.presentation.library.LibraryRouting.toCountMap(rows) }
+            .flowOn(Dispatchers.Default)
+            .orFallback(emptyMap())
+
     override suspend fun saveProject(project: Project) {
         dao.upsert(project.toEntity())
     }

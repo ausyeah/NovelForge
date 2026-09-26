@@ -130,6 +130,48 @@ class LibraryViewModel(
      */
     val lastReadIndex: StateFlow<Map<String, Int>> = _lastReadIndex.asStateFlow()
 
+    /**
+     * 哪些书写过正文：projectId -> 有正文的章数。
+     *
+     * 点封面要分流（点了去读），而 `Project` 自己不知道自己有没有正文 ——
+     * 它只有 status 和 creativeConfig，正文存在另一张表里。所以书架得自己
+     * 备一份计数。
+     *
+     * 只存 Int 不存正文：这张表要进 `rememberSaveable` 的 Bundle，
+     * 正文进去必炸（`lastReadIndex` 上面那个注释是同一个道理）。
+     */
+    private val _writtenCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
+
+    /** 有正文的章数；没有记录的书按 0 算（没正文）。 */
+    fun writtenCount(projectId: String): Int = _writtenCounts.value[projectId] ?: 0
+
+    /**
+     * 订阅那张计数表。
+     *
+     * 单独一个 Flow 而不是并进 `projects`：正文写完会让计数变，书架得跟着
+     * 变（写完一章之后同一个封面应该开始「点进去是读」）。合流的话每次
+     * 写正文都要重建整份书单。
+     */
+    fun observeWrittenCounts() {
+        viewModelScope.launch {
+            projectRepository.observeWrittenChapterCounts().collect { counts ->
+                _writtenCounts.value = counts
+            }
+        }
+    }
+
+    /**
+     * 点封面分流：有正文的去读，没正文的去写。
+     *
+     * 空书也点「阅读」的话会进目录页，而那里每张卡都是「未生成正文」——
+     * 一片死胡同，用户得自己退出来去找写作。开始写是所有书的必经一步，
+     * 所以空书直接送去写作。
+     *
+     * 规则本体在 [LibraryRouting]（纯函数，可 JVM 测），这里只做转发。
+     */
+    fun tapCoverGoesToReading(writtenChapters: Int): Boolean =
+        LibraryRouting.tapGoesToReading(writtenChapters)
+
     /** 书架停留期间按需拉一次阅读位置（DataStore 没有 Flow 可订阅） */
     fun refreshLastRead(projectId: String) {
         viewModelScope.launch {
@@ -544,6 +586,9 @@ fun LibraryScreen(
     LaunchedEffect(projects.map { it.id }) {
         viewModel.refreshCovers(projects.map { it.id })
     }
+    // 点封面分流要用的「写了几章」计数。写完一章后这张表会自己变，
+    // 同一个封面就从「点进去是写」变成「点进去是读」。
+    LaunchedEffect(Unit) { viewModel.observeWrittenCounts() }
     val readerThemes = listOf(followReaderTheme()) + READER_THEMES
     // 顶部「继续读」按下的那本书：书要现打开，等目录到齐后自己落到上次那一章
     var pendingReadId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -797,7 +842,7 @@ fun LibraryScreen(
                 // 把 backQueue 弹空 → 白屏 + 导航图销毁）。理由见空书架那一处。
                 PaperTopBar(
                     title = "书架",
-                    subtitle = "点击封面写作，长按可阅读、备份、重命名"
+                    subtitle = "点封面阅读，长按可写作、换封面、重命名、删除"
                 )
                 backupMessage?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall)
@@ -850,9 +895,10 @@ fun LibraryScreen(
                                         modifier = Modifier.fillMaxWidth(),
                                         accent = true
                                     )
-                                    // 阅读是次要动词：只有真存了阅读进度才给入口，
-                                    // 放在 accent 按钮下面且不抢主色。
+                                    // 续读是精确入口：直接落到上次读到的那一章。
                                     // 点它先开书，目录到齐后由上面的 LaunchedEffect 落到那一章。
+                                    // （点封面已经改成「去读」了，这里给的是「读哪一章」——
+                                    //  两件事，封面给前者，这个给后者。）
                                     lastReadIndex[target.id]?.let { resumeOrder ->
                                         TextButton(
                                             onClick = {
@@ -882,7 +928,20 @@ fun LibraryScreen(
                             cover = cover,
                             fallbackColor = fallback,
                             onThumbnail = { viewModel.coverThumbnail(project.id) },
-                            onClick = { onContinueWriting(project) },
+                            // 点封面 = 读。这本书写过了就去阅读器（落在上次读到的那一章），
+                            // 一次没写过的送去写作 —— 空书进阅读器是一片全「未生成正文」
+                            // 的死胡同，而开始写是所有书的必经一步。
+                            onClick = {
+                                if (viewModel.tapCoverGoesToReading(viewModel.writtenCount(project.id))) {
+                                    pendingReadId = project.id
+                                    viewModel.open(project)
+                                } else {
+                                    onContinueWriting(project)
+                                }
+                            },
+                            // 长按不变，还是那个管理菜单：换封面 / 重命名 / 删除 /
+                            // 导出备份 / 继续写作。菜单里第一项是「继续写作」，
+                            // 所以「长按去写书」这条路也还在。
                             onLongClick = { actionTarget = project }
                         )
                     }
@@ -905,9 +964,10 @@ fun LibraryScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("选择操作：")
-                    // 前两项是「去干什么」，后三项是「管这本书」。
-                    // 写作排第一：单击封面已经进写作界面，这里是显式入口，
-                    // 不写的话长按菜单就只剩管理动作，没有出路
+                    // 前两项是「去干什么」，后四项是「管这本书」。
+                    // 「继续写作」排第一：点封面已经改成去阅读（空书才去写），
+                    // 所以菜单是**唯一**能主动进写作的入口，不写这行菜单就只剩管理动作。
+                    // 顶栏副标题已经把这两条手势说清楚了，这里不重复。
                     Button(
                         onClick = {
                             actionTarget = null

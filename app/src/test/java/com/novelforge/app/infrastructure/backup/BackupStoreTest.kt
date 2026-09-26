@@ -7,6 +7,7 @@ import com.novelforge.app.data.local.OutlineVersionEntity
 import com.novelforge.app.data.local.ProjectDao
 import com.novelforge.app.data.local.ProjectEntity
 import com.novelforge.app.data.local.toDomain
+import com.novelforge.app.data.local.WrittenCountRow
 import com.novelforge.app.domain.model.ChapterRevision
 import com.novelforge.app.domain.model.ChapterStatus
 import com.novelforge.app.domain.model.CharacterProfile
@@ -473,6 +474,21 @@ class BackupStoreTest {
 
         override fun observeWrittenItemIds(projectId: String): Flow<List<String>> =
             flowOf(rows.values.filter { it.projectId == projectId }.map { it.outlineItemId }.distinct())
+
+        /**
+         * 忠实模拟真 SQL 的两个条件，别简化成 `rows.size`：
+         * `content != ''` 滤掉空正文，`DISTINCT outlineItemId` 把多稿修订并成一章。
+         * 简化掉的写法会让「改过三稿的章被数成三章」这类错误测不出来。
+         */
+        override fun observeWrittenCountsByProject(): Flow<List<WrittenCountRow>> =
+            flowOf(
+                rows.values
+                    .filter { it.content.isNotEmpty() }
+                    .groupBy { it.projectId }
+                    .map { (projectId, list) ->
+                        WrittenCountRow(projectId, list.map { it.outlineItemId }.distinct().size)
+                    }
+            )
 
         override suspend fun contentLengthBySnapshot(promptSnapshotId: String): Int? =
             rows.values.firstOrNull { it.promptSnapshotId == promptSnapshotId }?.content?.length

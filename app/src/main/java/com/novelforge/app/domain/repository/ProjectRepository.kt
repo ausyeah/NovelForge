@@ -20,4 +20,20 @@ interface ProjectRepository {
      * block 收到的永远是库里的最新状态。
      */
     suspend fun mutateContinuity(id: String, block: (ContinuityState) -> ContinuityState)
+
+    /**
+     * 每本书「有正文的章数」，按 projectId 索引。
+     *
+     * 点封面分流要用（有点去读，没点去写），而 `Project` 自己不知道自己有没有
+     * 正文 —— 正文在 `chapter_revisions` 里。所以书架得单独问一次。
+     *
+     * **刻意不并进 `observeProjects()`**：`Project` 是整行读出来的，正文更是
+     * 每本书几 MB。书架每次刷新把所有书的正文拉一遍，是它这个页面最不必要
+     * 的一笔开销（而且这个 Flow 还进 `rememberSaveable`）。
+     *
+     * `content != ''` 这个条件不能省：`chapter_revisions` 里存在空正文的行
+     * （写了一半被杀、或正文被清空），那种不能算「写过了」，否则点进去
+     * 又是一片空目录。
+     */
+    fun observeWrittenChapterCounts(): Flow<Map<String, Int>>
 }

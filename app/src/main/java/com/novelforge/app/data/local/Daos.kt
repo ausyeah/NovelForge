@@ -73,6 +73,28 @@ interface ChapterRevisionDao {
     @Query("SELECT DISTINCT outlineItemId FROM chapter_revisions WHERE projectId = :projectId")
     fun observeWrittenItemIds(projectId: String): Flow<List<String>>
 
+    /**
+     * 每本书"有正文的章数"，按 projectId 分组。
+     *
+     * 书架点封面分流用：写过了就去读，没写就送去写作。
+     *
+     * 两个条件都不能省：
+     * - `content != ''` —— 存在空正文的行（写一半被杀、正文被清空），
+     *   算进去的话点进去又是一片空目录；
+     * - `COUNT(DISTINCT outlineItemId)` 而不是 `COUNT(*)` —— 一章可以有多次
+     *   修订（`outlineItemId` + `revision` 上有唯一索引），按行数算会把
+     *   改过三稿的章数成三章。
+     */
+    @Query(
+        """
+        SELECT projectId AS projectId, COUNT(DISTINCT outlineItemId) AS writtenCount
+        FROM chapter_revisions
+        WHERE content != ''
+        GROUP BY projectId
+        """
+    )
+    fun observeWrittenCountsByProject(): Flow<List<WrittenCountRow>>
+
     @Query("SELECT LENGTH(content) FROM chapter_revisions WHERE promptSnapshotId = :snapshotId LIMIT 1")
     suspend fun contentLengthBySnapshot(snapshotId: String): Int?
 
@@ -286,6 +308,17 @@ interface LlmCallDao {
     )
     fun observeUsageLog(since: Long): Flow<List<LlmCallRecentRow>>
 }
+
+/**
+ * 「这本书有几章写了正文」的一行。
+ *
+ * 别和 `LlmCall*Row` 混在一起 —— 那些是账本聚合，这个是书架分流用的，
+ * 两者生命周期和刷新时机都不一样。
+ */
+data class WrittenCountRow(
+    val projectId: String,
+    val writtenCount: Int
+)
 
 data class LlmCallProjectSummaryRow(
     val projectTitle: String,

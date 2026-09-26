@@ -17,6 +17,7 @@ import com.novelforge.app.infrastructure.llm.LLMConnectionConfig
 import com.novelforge.app.infrastructure.llm.ProviderCapabilities
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -203,6 +204,8 @@ class GenerationUseCaseTest {
     private class RecordingProjectRepository : ProjectRepository {
         var saved: Project? = null
         override fun observeProjects(): Flow<List<Project>> = emptyFlow()
+        // 书架点封面分流用的计数，这个用例不关心；给空表 = 「所有书都没正文」
+        override fun observeWrittenChapterCounts(): Flow<Map<String, Int>> = flowOf(emptyMap())
         override suspend fun getProject(id: String): Project? = saved?.takeIf { it.id == id }
         override suspend fun saveProject(project: Project) {
             saved = project

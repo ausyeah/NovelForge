@@ -195,8 +195,17 @@ fun LedgerScreen(viewModel: LedgerViewModel, onBack: () -> Unit) {
                         Column(modifier = Modifier.weight(1.4f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text("总 Tokens", style = MaterialTheme.typography.bodySmall)
                             Text(formatTokens(totals.totalTokens), fontWeight = FontWeight.Bold, style = MaterialTheme.typography.headlineSmall)
-                            Text("输入 ${formatTokens(totals.totalInput)}（净 ${formatTokens(totals.totalInput - totals.totalCached)} + 缓存 ${formatTokens(totals.totalCached)}）", style = MaterialTheme.typography.bodySmall)
-                            Text("输出 ${formatTokens(totals.totalOutput)}（含思考 ${formatTokens(totals.totalReasoning)}）", style = MaterialTheme.typography.bodySmall)
+                            // 缓存留着，思考去掉。理由：思考 token 本来就含在
+                            // output 里（reasoning_tokens 是 completion_tokens
+                            // 的子集），单列一遍既不增加信息，又把输出那行撑长；
+                            // 而且思考默认不开，绝大多数调用这一项都是 0。
+                            // 缓存不一样 —— 它是**折扣计费**的部分，净输入要靠它
+                            // 才算得出来，所以留。
+                            Text(
+                                "输入 ${formatTokens(totals.totalInput)}（其中缓存 ${formatTokens(totals.totalCached)}）",
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Text("输出 ${formatTokens(totals.totalOutput)}", style = MaterialTheme.typography.bodySmall)
                             if (totals.totalEstimated > 0) {
                                 Text("${totals.totalEstimated}/${totals.totalCalls} 次为估算值（≈）", style = MaterialTheme.typography.bodySmall)
                             }
@@ -300,9 +309,15 @@ private fun ModelUsageRow(row: LlmCallModelSummaryRow, maxTokens: Long) {
         )
     }
     Text(
-        "入 ${formatTokens(row.inputTokens)}（缓存 ${formatTokens(row.cachedInputTokens)}） · " +
-            "出 ${formatTokens(row.outputTokens)}（思考 ${formatTokens(row.reasoningTokens)}） · " +
-            "成功 ${row.successCalls}/${row.calls}" + if (row.estimatedCalls > 0) " · ≈${row.estimatedCalls}次" else "",
+        tokenBreakdown(
+            input = row.inputTokens,
+            cached = row.cachedInputTokens,
+            output = row.outputTokens,
+            // 排行是拿来横向比较模型的，"这个模型一点缓存都没命中"本身就是
+            // 有用信息，所以 0 也显示；日志行是流水账，0 就别占地方了
+            showCacheWhenZero = true
+        ) + " · 成功 ${row.successCalls}/${row.calls}" +
+            if (row.estimatedCalls > 0) " · ≈${row.estimatedCalls}次" else "",
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant
     )
@@ -370,13 +385,12 @@ private fun UsageLogRow(row: LlmCallRecentRow) {
             overflow = TextOverflow.Ellipsis
         )
         if (total > 0) {
-            val cached = row.cachedInputTokens ?: 0
-            val reasoning = row.reasoningTokens ?: 0
             Text(
-                "入 ${formatTokens(row.inputTokens ?: 0)}" +
-                    if (cached > 0) "（缓存 ${formatTokens(cached)}）" else "" +
-                    " · 出 ${formatTokens(row.outputTokens ?: 0)}" +
-                    if (reasoning > 0) "（思考 ${formatTokens(reasoning)}）" else "",
+                tokenBreakdown(
+                    input = row.inputTokens ?: 0,
+                    cached = row.cachedInputTokens ?: 0,
+                    output = row.outputTokens ?: 0
+                ),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
@@ -409,7 +423,9 @@ private class LedgerTotals(
     val totalInput = models.sumOf { it.inputTokens }
     val totalOutput = models.sumOf { it.outputTokens }
     val totalCached = models.sumOf { it.cachedInputTokens }
-    val totalReasoning = models.sumOf { it.reasoningTokens }
+    // reasoningTokens 仍在库里、也仍然统计（Daos.kt 的 SUM 还在跑），
+    // 但账本不显示它：它含在 output 里，且默认不开思考时恒为 0。
+    // 这里不再求和，避免留一个没人用的派生值误导下一个人。
     val totalEstimated = models.sumOf { it.estimatedCalls }
     val totalTokens = totalInput + totalOutput
     val allCalls = purposes.sumOf { it.calls }
@@ -423,6 +439,35 @@ private fun formatTokens(value: Long): String = when {
     value >= 100_000_000 -> "%.1f亿".format(value / 1e8)
     value >= 10_000 -> "%.1f万".format(value / 10_000.0)
     else -> "$value"
+}
+
+/**
+ * 「入 N（缓存 M） · 出 X」这一行明细。
+ *
+ * **这里原来是个 bug，值得记下来。** 当时的写法是：
+ * ```
+ * "入 " + f(input) + if (cached > 0) "（缓存…）" else "" + " · 出 " + f(output)
+ * ```
+ * Kotlin 里 `+` 的优先级比 `if` 表达式**高**，而 `if` 的 else 分支会一路
+ * 吃到表达式末尾，所以上面这行实际解析成：
+ * ```
+ * "入 " + f(input) + (if (cached > 0) "（缓存…）" else ("" + " · 出 " + f(output)))
+ * ```
+ * 结果：**一旦命中缓存，输出 token 那一整段连同分隔符一起消失**，
+ * 只剩「入 12000（缓存 8000）」。越该显示数字的时候越不显示。
+ *
+ * 而且这正好砸在用户最关心的场景上 —— 有缓存命中的时候。
+ *
+ * 现在先算好每一段再拼，优先级无从作怪。
+ */
+internal fun tokenBreakdown(
+    input: Long,
+    cached: Long,
+    output: Long,
+    showCacheWhenZero: Boolean = false
+): String {
+    val cacheNote = if (cached > 0 || showCacheWhenZero) "（缓存 ${formatTokens(cached)}）" else ""
+    return "入 ${formatTokens(input)}$cacheNote · 出 ${formatTokens(output)}"
 }
 
 private fun purposeLabel(purpose: String): String = when (purpose) {

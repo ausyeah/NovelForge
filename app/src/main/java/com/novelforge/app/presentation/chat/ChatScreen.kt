@@ -21,10 +21,12 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
@@ -54,6 +56,8 @@ import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,6 +67,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
@@ -1003,61 +1008,52 @@ private fun openImage(context: android.content.Context, path: String) {
         ?: "附件"
 }
 
-/** 整段复制到剪贴板。Android 13+ 系统会自己弹「已复制」提示，不要重复弹。 */
-private fun copyToClipboard(context: android.content.Context, label: String, text: String) {
-    runCatching {
-        val clipboard = context.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-            as? android.content.ClipboardManager ?: return
-        clipboard.setPrimaryClip(android.content.ClipData.newPlainText(label, text))
-    }
+/**
+ * 整段复制到剪贴板 —— **已删除**。
+ *
+ * 它唯一的调用方是那行每条消息下面的「复制」按钮（`CopyRow`），按钮删了之后
+ * 就没有调用方了。留着等于给下一个人留了个零件：照着 git log 就能把它捡回来，
+ * 再把按钮挂回每条气泡下面。
+ *
+ * 现在整条复制走系统：长按正文 → 系统选择工具栏（复制 / 全选 / 分享）。
+ */
+@Suppress("unused")
+private fun copyToClipboardRemovedOnPurpose() {
 }
 
 /**
- * 气泡下方的复制按钮行。
+ * 气泡下方的复制按钮行 —— **已删除**。
  *
- * 摆在正文下面的正常竖向流里，不叠在文字上 —— 叠上去的点击手势会和
- * SelectionContainer 的长按选词抢同一个按下事件，二选一。
- * 这里选了选词（系统工具栏自带复制/全选/分享），把"整段拿走"用按钮补上。
+ * 这里是它当初为什么被加上去、现在为什么又该拿掉：
+ *
+ * 最早的整条复制是给气泡挂 `pointerInput { detectTapGestures(onLongPress = …) }`。
+ * 那个 API 会 `down.consume()`，把外层 `SelectionContainer` 的长按选词整个吃掉
+ * —— 系统工具栏（复制 / 全选 / 分享）全废，只在默认配置下或换成 assistant
+ * 气泡才碰巧没事。依赖它就是等着某天换配置时静默弄坏选词。
+ *
+ * 于是改成这个：正文下面一行「复制」按钮，和选词共存（摆在竖向流里不叠字）。
+ * 但用户明确不要 —— **每条回复下面挂一行按钮，聊天记录被切得七零八落，
+ * 而且点它就在动正文，干扰读。**
+ *
+ * 现在：**一个多余手势都不加**。整条复制走系统自己的路 ——
+ * 长按正文 → 系统选择工具栏（复制 / 全选 / 分享）。这也是用户要的样子：
+ * 「是长按复制」。长按本来就要留给选词，两者不冲突。
+ *
+ * 代价是「一键复制整条」没了：得长按 → 全选 → 复制三下。换来的是
+ * 屏幕上没有任何不属于对话内容的元素。
  */
-@Composable
-private fun CopyRow(text: String, reasoning: String, tint: androidx.compose.ui.graphics.Color? = null) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val color = tint ?: MaterialTheme.colorScheme.onSurfaceVariant
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 6.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        if (text.isNotBlank()) {
-            CopyButton("复制", color) {
-                copyToClipboard(context, "NovelForge", text)
-            }
-        }
-        if (reasoning.isNotBlank()) {
-            CopyButton("复制思考", color) {
-                copyToClipboard(context, "NovelForge 思考过程", reasoning)
-            }
-        }
-    }
+@Suppress("unused")
+private fun CopyRowRemovedOnPurpose() {
+    // 刻意留一个空壳函数，让「这个概念已经不存在」在代码里有个位置，
+    // 而不是让下一个人照着 git log 里那版再实现一遍。
+    // 真要复制：长按正文 → 系统选择工具栏 → 复制。
 }
 
-@Composable
-private fun CopyButton(label: String, tint: androidx.compose.ui.graphics.Color, onCopy: () -> Unit) {
-    Text(
-        label,
-        style = MaterialTheme.typography.labelMedium,
-        color = tint,
-        modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .clickable(onClick = onCopy)
-            // 内边距必须在 clickable **之后**才是真的把点击区撑大。
-            // 顺序反了的话 padding 落在手势区外面，命中区只剩文字本身：
-            // "复制"两个字大约 28×16dp，远低于 48dp 最小点击区。
-            .padding(horizontal = 8.dp, vertical = 10.dp)
-            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
-    )
+/**
+ * 复制按钮 —— **已删除**。理由见上面 [CopyRowRemovedOnPurpose]。
+ */
+@Suppress("unused")
+private fun CopyButtonRemovedOnPurpose() {
 }
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
@@ -1099,6 +1095,49 @@ fun ChatScreen(
     val scrolling by remember { derivedStateOf { listState.isScrollInProgress } }
     LaunchedEffect(atBottom, scrolling, touching) {
         viewModel.setFrozen(!atBottom || scrolling || touching)
+    }
+
+    // 键盘收起时「先触底再弹回」——修这个。
+    //
+    // 成因是两个东西在打架：
+    //  - 消息区是 `reverseLayout = true` 的 LazyColumn。reverseLayout 下**第一条
+    //    钉在视口底部**，内容往上长。
+    //  - 键盘收起时 `imePadding()` 的 inset 从「键盘高度」动画回 0，**视口高度
+    //    在几百毫秒里连续变大**。
+    // reverseLayout 的 LazyColumn 每次测量变化都会按「第一条仍在底部」重新锚定，
+    // 而这段时间里它自己也在被键盘顶上来 —— 两者叠加就是用户看到的：
+    // 先猛冲到底，然后弹回原处。
+    //
+    // 没有一条 `scrollToItem` 是罪魁：它们只挂在 `messages.size` 和 `activeId` 上，
+    // 键盘开合不触发。所以只能从「视口变化时保住用户读到的位置」这一层解决。
+    //
+    // 做法：只在**用户主动离开底部之后**记住位置；等视口稳定（再等一帧）后
+    // 按位置复位。还在底部时不记也不复位 —— 那时列表本来就该跟着键盘走。
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    // 视口正在因为键盘变化而重排：这段时间记下来的位置是被冲刷过的，不作数
+    var imeSettling by remember { mutableStateOf(false) }
+    // 用户离开底部时读到的位置（reverseLayout 下 index 0 == 底部）
+    var awayFromBottom by remember { mutableStateOf<Pair<Int, Int>?>(null) }
+
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset }
+            .collect { (index, offset) ->
+                if (imeSettling) return@collect
+                awayFromBottom = if (index == 0 && offset == 0) null else index to offset
+            }
+    }
+    LaunchedEffect(imeVisible) {
+        imeSettling = true
+        // 等两帧：第一帧 inset 还在动画里，第二帧视口才稳定。
+        // 少一帧的话复位会打在动画中途，又被冲掉一次。
+        withFrameNanos { }
+        withFrameNanos { }
+        imeSettling = false
+        val anchor = awayFromBottom
+        if (anchor != null) {
+            listState.scrollToItem(anchor.first, anchor.second)
+        }
     }
     // 仅在用户发出新消息的瞬间跳到底部（令牌流期间绝不主动滚动）
     val lastRole = messages.lastOrNull()?.role
@@ -1247,9 +1286,16 @@ fun ChatScreen(
                         // SelectionContainer 只管选词，**绝对不要**在气泡上再装
                         // clickable / combinedClickable / pointerInput：
                         // 那几个都会 down.consume()，把外层选择手势的按键事件吃掉，
-                        // 长按拖选就彻底废了（长按复制、全选、分享全没了）。
-                        // 所以「整条复制」做成气泡下方的一行按钮，
-                        // 它在正常竖向流里，不盖住任何文字。
+                        // 长按拖选就彻底废了（全选、分享全没了）。
+                        //
+                        // 这个坑踩过两次：
+                        //  1. 最早用 pointerInput { detectTapGestures(onLongPress = …) }
+                        //     做长按复制 —— 直接把选词废了，而且只在默认配置下复现。
+                        //  2. 退一步改成气泡下面一行「复制」按钮 —— 选词保住了，但每条
+                        //     消息下面多一行，干扰阅读（用户原话：「不是这样在气泡里
+                        //     影响我看」）。
+                        // 现在：气泡上**什么都不加**。整条复制走系统选择工具栏 ——
+                        // 长按 → 全选 → 复制。长按本来就要留给选词，两者不冲突。
                         SelectionContainer {
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
@@ -1289,14 +1335,10 @@ fun ChatScreen(
                                                     color = MaterialTheme.colorScheme.onPrimary
                                                 )
                                             }
-                                            // 自己的提问也常要复制走（改一改重问、贴到别处）
-                                            if (message.text.isNotBlank()) {
-                                                CopyRow(
-                                                    text = message.text,
-                                                    reasoning = "",
-                                                    tint = onPrimary.copy(alpha = 0.75f)
-                                                )
-                                            }
+                                            // 这里原来有「自己的提问也常要复制走」的一行
+                                            // CopyRow 按钮。用户嫌它干扰阅读（每条消息下面
+                                            // 都挂一行按钮，聊天记录被切得七零八落）。
+                                            // 现在复制统一走系统：长按 → 全选 → 复制。
                                         }
                                     }
                                     }
@@ -1435,19 +1477,13 @@ fun ChatScreen(
                                                 )
                                             }
 
-                                            // 整条复制。放在正文**下面**而不是长按菜单里：
-                                            // 长按菜单必须盖在气泡上，会把选择手势的按键事件吃掉，
-                                            // 而这个 app 的产出是几千字的方案和推理，
-                                            // 读者想要的是"整段拿走"，长按选词反而给不了。
-                                            // 流式过程中不给按钮：半句话复制出来没意义。
-                                            if (!message.streaming &&
-                                                (message.text.isNotBlank() || message.reasoning.isNotBlank())
-                                            ) {
-                                                CopyRow(
-                                                    text = message.text,
-                                                    reasoning = message.reasoning
-                                                )
-                                            }
+                                            // 这里原来有整条复制的按钮行。用户原话：「是长按复制，
+                                            // 不是这样在气泡里影响我看」—— 每条回复下面挂一行按钮，
+                                            // 聊天记录被切得七零八落，点它就在动正文。
+                                            //
+                                            // 整条复制现在走系统：长按正文 → 系统选择工具栏
+                                            // （复制 / 全选 / 分享）。长按本来就要留给选词，
+                                            // 两者不冲突，而且屏幕上没有任何不属于对话内容的元素。
                                         }
                                     }
                                 }

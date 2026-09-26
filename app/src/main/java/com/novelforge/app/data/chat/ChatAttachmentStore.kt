@@ -54,7 +54,11 @@ class ChatAttachmentStore(private val context: Context) {
                 temp.outputStream().use { it.write(bytes) }
                 if (!temp.renameTo(file)) {
                     temp.delete()
-                    error("封面文件写入失败")
+                    // 原来这里写的是「封面文件写入失败」—— 从封面那套代码复制过来的。
+                    // 用户在聊天页看到「封面」两个字只会以为跑错了页面，
+                    // 而这正是附件添加失败时唯一能看到的解释。
+                    // 下面 saveDocument 里那一句才是对的写法。
+                    error("图片文件写入失败")
                 }
                 StoredAttachment(
                     path = file.absolutePath,

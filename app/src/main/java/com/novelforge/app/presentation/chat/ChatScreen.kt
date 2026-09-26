@@ -816,11 +816,9 @@ private fun StoredChatMessage.toUiMessage(): UiChatMessage = UiChatMessage(
 private val UserBubbleShape = RoundedCornerShape(20.dp, 6.dp, 20.dp, 20.dp)
 private val AssistantBubbleShape = RoundedCornerShape(6.dp, 20.dp, 20.dp, 20.dp)
 
-/** 思考链默认只铺这几行，超出部分给省略号 + "展开全部"。 */
-private const val REASONING_PREVIEW_LINES = 8
-
-/** 短思考直接全展示，只有超长才需要额外的展开档位。 */
-private const val REASONING_PREVIEW_CHARS = 300
+// 原来这里有两个常量：REASONING_PREVIEW_LINES = 8、REASONING_PREVIEW_CHARS = 300，
+// 用来做「思考超过一定长度就截断 + 展开全部」。两个都删了 ——
+// 折叠只由「思考结束没有」决定，长度不参与。理由见折叠处那段注释。
 
 private val chatTimeFormat = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
 
@@ -857,6 +855,9 @@ private fun AttachmentStrip(
                     modifier = Modifier
                         .size(64.dp)
                         .clip(RoundedCornerShape(8.dp))
+                        // 边框而不是底色：底色 10% 透明度在纸色背景上基本看不出边界，
+                        // 结果是"这个格子到底存不存在"都看不出来。
+                        .border(1.dp, tint.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
                         .background(tint.copy(alpha = 0.10f))
                         .clickable(enabled = isImage) { if (isImage) openImage(context, stored.path) },
                     contentAlignment = Alignment.Center
@@ -876,7 +877,23 @@ private fun AttachmentStrip(
                                 modifier = Modifier.fillMaxSize()
                             )
                         } else {
-                            Text("▨", color = tint.copy(alpha = 0.6f))
+                            // 原来是一个 10% 底色的「▨」。那个透明度低到几乎看不见 ——
+                            // 缩略图解不出来时，用户看到的就是"什么都没有"，
+                            // 而附件其实已经在发送队列里了。
+                            // 这里改成有边框的方块 + 一个能认出来的字，
+                            // 至少能看出"这里有一张图，只是预览不出来"。
+                            // 静默降级成空白比报错更糟：报错至少会让人去查。
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(1.dp)
+                            ) {
+                                Text("▨", color = tint, style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    "读不出",
+                                    color = tint,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
                         }
                     } else {
                         Text("📄", fontSize = 20.sp)
@@ -1281,18 +1298,37 @@ fun ChatScreen(
                                             modifier = Modifier
                                                 .padding(horizontal = 16.dp, vertical = 12.dp)
                                         ) {
-                                            // 两个状态都挂在消息 id 上，不能按位置记
+                                            // 折叠规则只有一条：**思考结束就折起来**。
+                                            //
+                                            // 原来有两条，第二条是错的，而且方向也反了：
+                                            //
+                                            // 1) `remember(message.id) { mutableStateOf(message.streaming) }`
+                                            //    **只在首次组合时求值一次。** 流式结束把 streaming
+                                            //    翻成 false 之后这个 remember 不会重跑，所以思考
+                                            //    一旦展开就永远不会再自动折起来 —— 和「结束就折叠」
+                                            //    正好相反。keyed 的 LazyColumn 里条目是持续存在的，
+                                            //    不会因为状态变就重新组合一次。
+                                            //    现在补一个 LaunchedEffect 监听 streaming 的翻转。
+                                            //
+                                            // 2) 超过 300 字就截成 8 行 + 一个「展开全部」。按长度折叠
+                                            //    更不对：**正在生成的时候恰恰最需要看见它在想什么**，
+                                            //    而它偏偏在这时候开始截断，得再点一次才看得到，
+                                            //    而且每来一批新 token 就重新截一次。整个长度档位删掉。
+                                            //
+                                            // 初值仍然取 streaming，避免首帧先折后开地闪一下；
+                                            // effect 首次运行会写回同一个值，是空操作。
+                                            //
+                                            // 折起来之后仍然可以手动展开重看 —— effect 只在 streaming
+                                            // 变化时跑，之后用户的点击不受打扰。
                                             var reasoningOpen by remember(message.id) {
                                                 mutableStateOf(message.streaming)
                                             }
-                                            var reasoningFull by remember(message.id) {
-                                                mutableStateOf(false)
+                                            LaunchedEffect(message.streaming) {
+                                                reasoningOpen = message.streaming
                                             }
-                                            val reasoningLong =
-                                                message.reasoning.length > REASONING_PREVIEW_CHARS
                                             if (message.reasoning.isNotBlank()) {
-                                                // 这两个折叠标签是气泡里唯一"故意不让选词"的地方：
-                                                // 它们自己就是手势控件，选中它们没有意义。
+                                                // 这个折叠标签是气泡里唯一"故意不让选词"的地方：
+                                                // 它自己就是手势控件，选中它没有意义。
                                                 // 但也正因为是控件，命中区得补到 48dp ——
                                                 // labelSmall 一行只有 16dp 高，长得跟普通文字一样，
                                                 // 会被当成正文去长按选词，然后发现点不动。
@@ -1302,10 +1338,6 @@ fun ChatScreen(
                                                     // 这里、又是可点的 —— 说一遍就够。改成标签自带
                                                     // 当前状态。顺带修掉原来收着和展开着都念
                                                     // 「展开/收起」：那个文案根本不区分这两种状态。
-                                                    //
-                                                    // 注意和下面那个「展开全部」区分开：这两个是嵌套
-                                                    // 的折叠，长思考展开时两个同时可见，所以措辞必须
-                                                    // 一个管整块、一个管块内的截断，不能撞车。
                                                     when {
                                                         message.streaming -> "思考中…"
                                                         reasoningOpen -> "收起思考 ↑"
@@ -1328,50 +1360,23 @@ fun ChatScreen(
                                                         }
                                                 )
                                                 if (reasoningOpen) {
-                                                    // 思考链动辄几千字：默认只给几行，
-                                                    // 再给一个"展开全部"，否则一个气泡能撑爆整屏
+                                                    // 不截断、不限行。展开就整段铺开。
+                                                    //
+                                                    // 原来是 maxLines = 8 + 省略号，再加一个「展开全部」
+                                                    // —— 两个问题：生成中你最想看它在想什么，它偏偏这时
+                                                    // 开始截断；而且每来一批 token 就重新截一次，得反复
+                                                    // 点。现在只有「结束就折起来」这一个状态，长度不参与。
+                                                    //
+                                                    // 几千字的思考链撑爆整屏的问题现在由自动折叠兜底：
+                                                    // 结束那一刻就折回去了，真要重看再手动展开。
                                                     Text(
                                                         message.reasoning,
                                                         style = MaterialTheme.typography.bodySmall.copy(
                                                             lineHeight = 18.sp
                                                         ),
                                                         color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
-                                                        maxLines = if (reasoningLong && !reasoningFull) {
-                                                            REASONING_PREVIEW_LINES
-                                                        } else {
-                                                            Int.MAX_VALUE
-                                                        },
-                                                        overflow = TextOverflow.Ellipsis,
                                                         modifier = Modifier.padding(bottom = 8.dp)
                                                     )
-                                                    if (reasoningLong) {
-                                                        Text(
-                                                            // 「全部」而不是「思考」：上面那个折叠已经管
-                                                            // 整块思考了，这里管的是块内被截断的那一段。
-                                                            // 长思考时两个标签同时可见，措辞撞车会让人
-                                                            // 以为按了没反应。
-                                                            if (reasoningFull) "收起全部 ↑" else "展开全部 ↓",
-                                                            style = MaterialTheme.typography.labelSmall,
-                                                            color = MaterialTheme.colorScheme.primary,
-                                                            modifier = Modifier
-                                                                .padding(bottom = 8.dp)
-                                                                .toggleable(
-                                                                    value = reasoningFull,
-                                                                    onValueChange = { reasoningFull = it },
-                                                                    // 和上面那个保持一致：这是展开/收起，
-                                                                    // 不是开关，说成"按钮 + 已展开"更贴切
-                                                                    role = Role.Button
-                                                                )
-                                                                .defaultMinSize(
-                                                                    minWidth = 48.dp,
-                                                                    minHeight = 48.dp
-                                                                )
-                                                                .semantics {
-                                                                    stateDescription =
-                                                                        if (reasoningFull) "已展开" else "已收起"
-                                                                }
-                                                        )
-                                                    }
                                                 }
                                             }
                                             if (message.text.isNotEmpty()) {

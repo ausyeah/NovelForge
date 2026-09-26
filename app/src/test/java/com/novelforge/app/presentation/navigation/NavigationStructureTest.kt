@@ -109,6 +109,63 @@ class NavigationStructureTest {
         assertTrue(showsBottomBar("memory/p1"))
     }
 
+    /**
+     * 输入法弹起时，凡是有底栏的页面都必须把底栏收掉。
+     *
+     * 这条修的是一个**布局 bug**，不是审美选择。根因是三层高度对不上：
+     * Scaffold 把底栏高度算进 innerPadding，底栏自己没加 imePadding 所以被压在
+     * 键盘底下（看不见也点不着），而页面在内容 Column 上加了 imePadding 把输入框
+     * 顶到「窗口高 − 底栏高 − 键盘高」。键盘顶边在「窗口高 − 键盘高」——
+     * 两个一减，输入框和键盘之间正好空出一个底栏的高度（约 80dp）。
+     *
+     * 聊天页是用户报出来的那个，但同一个 bug 波及所有「有底栏 + 有输入框」的页面，
+     * 所以这里逐个点名，不只测聊天。
+     */
+    @Test
+    fun imeVisibleHidesTheBottomBarOnEveryScreenThatWouldShowIt() {
+        val withBottomBar = listOf(
+            Routes.BOOKS,
+            Routes.CHAT,
+            "chat?projectId=p1",
+            Routes.SETTINGS,
+            Routes.LEDGER,
+            Routes.EXPORTS,
+            "outline/p1",
+            "outline/p1?autostart=true",
+            "memory/p1"
+        )
+        for (route in withBottomBar) {
+            assertTrue(
+                "前置条件失效：$route 本来就该有底栏，这条测试才有意义",
+                showsBottomBar(route)
+            )
+            assertFalse(
+                "$route 在输入法弹起时仍显示底栏 —— 输入框会被顶离键盘约 80dp",
+                showsBottomBar(route, imeVisible = true)
+            )
+        }
+    }
+
+    /**
+     * 隐藏底栏不能顺手把别的东西也隐藏掉。
+     *
+     * `showsBottomBar(route, true)` 里的 `if (imeVisible) return false` 必须排在
+     * route 判断**之前**才对（键盘盖住底栏时，跟你在哪一页无关）。但如果有人
+     * 把它挪到后面，或者误改成"IME 可见时只对某些路由返回 false"，单任务页的
+     * 行为就会悄悄变。这条把两种调用方式的关系钉住。
+     */
+    @Test
+    fun imeVisibleDoesNotChangeWhichScreensAreSinglePurpose() {
+        // 本来就没有底栏的页面，弹不弹输入法都一样没有
+        for (route in listOf("chapter/p1/chapter-7", Routes.CREATE, "creative-setup/p1")) {
+            assertFalse(showsBottomBar(route))
+            assertFalse(showsBottomBar(route, imeVisible = true))
+        }
+        // route 为 null 时 IME 也要压过默认值 —— 否则键盘弹起的第一帧底栏会闪一下
+        assertTrue(showsBottomBar(null))
+        assertFalse(showsBottomBar(null, imeVisible = true))
+    }
+
     @Test
     fun everyBottomBarDestinationResolvesBackToItself() {
         // 一级目的地之间切换用 findStartDestination + saveState/restoreState。

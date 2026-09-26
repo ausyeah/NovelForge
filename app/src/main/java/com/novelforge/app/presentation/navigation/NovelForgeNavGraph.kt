@@ -6,12 +6,14 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Scaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.foundation.layout.WindowInsets
@@ -105,6 +107,20 @@ private fun buildExportChapters(
     }.sortedBy { it.orderIndex }
 }
 
+/**
+ * 底栏「书架」够得着 LibraryViewModel 的唯一通路。
+ *
+ * 书内目录不是路由，是 `books` 这一页里的内部状态；而 `books` 是 startDestination，
+ * `popUpTo` / `launchSingleTop` / `restoreState` 那套多返回栈参数在书内**关不掉它**
+ * （逐条依据见 `onSelectTopLevel` 上面的注释）。所以切 tab 时得直接叫 `close()`。
+ */
+private class BooksTabHolder {
+    var viewModel: com.novelforge.app.presentation.library.LibraryViewModel? = null
+}
+
+// ExperimentalLayoutApi：底栏要用 WindowInsets.isImeVisible，
+// 而 Scaffold 的 contentWindowInsets 本身也在这套实验 API 里。
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun NovelForgeApp(application: NovelForgeApplication) {
     val navController = rememberNavController()
@@ -115,6 +131,14 @@ fun NovelForgeApp(application: NovelForgeApplication) {
         factory = HomeViewModel.Factory(application.projectRepository)
     )
     val projects by homeViewModel.projects.collectAsStateWithLifecycle()
+
+    // 底栏「书架」需要够得着 LibraryViewModel 才能把书关掉（见 onSelectTopLevel）。
+    // 它是在 composable(Routes.BOOKS) 内部建的，而 onSelectTopLevel 定义在外面，
+    // 所以这里留一个 holder，由那一处回填。
+    //
+    // 不用 mutableStateOf(ViewModel)：ViewModel 本身不可变，变化不需要重组，
+    // 而且往状态里塞 ViewModel 会诱使人写出「状态变了就重组」的错误预期。
+    val booksTab = remember { BooksTabHolder() }
 
     // 打开一本书。创作设置没做完先进设置页 —— 那是这本书的必经一步。
     val openProject: (Project) -> Unit = { project ->
@@ -129,7 +153,21 @@ fun NovelForgeApp(application: NovelForgeApplication) {
     // 一级目的地之间切换用「多返回栈」：每个 tab 保留自己那一摞页面，
     // 切走再切回来不会退回到首页。之前没有这三个参数，
     // 从任意页面去另一个页面都得先退回首页，页面上又没有常驻导航告诉用户还有别的地方可去。
+    // 但这套参数**关不掉书内目录**：书不是路由，是 `books` 这一页里的内部状态
+    // （`LibraryViewModel._novel`），而 `books` 恰好是 startDestination。查过
+    // Navigation 2.8.5 的源码之后，三件事同时成立：
+    //   - `popUpTo` 默认 **非** inclusive，永远弹不到它自己那个 entry；
+    //   - `restoreState` 和 `launchSingleTop` 在 `NavController.navigate` 里是
+    //     **if/else**，而上面那步会把 `backStackMap[booksId]` 填上，于是
+    //     `restoreStateInternal` 抢先命中，`launchSingleTop` 那条分支根本不会走；
+    //   - `launchSingleTopInternal` 即便走了也只是换个 entry 壳，同 id 同 store，
+    //     ViewModel 还是同一个实例，`_novel` 照样活着。
+    // 结果是 `navigate("books")` 在书内是**彻底空操作**，tab 还显示已选中，
+    // 用户出不去。所以切到书架时先把书关掉。
     val onSelectTopLevel: (TopLevelDestination) -> Unit = { destination ->
+        if (destination == TopLevelDestination.Books) {
+            booksTab.viewModel?.close()
+        }
         navController.navigate(destination.route) {
             popUpTo(navController.graph.findStartDestination().id) { saveState = true }
             launchSingleTop = true
@@ -142,7 +180,9 @@ fun NovelForgeApp(application: NovelForgeApplication) {
         // 这里传 0 免得 Scaffold 再垫一层，把布局推上去。
         contentWindowInsets = WindowInsets(0),
         bottomBar = {
-            if (showsBottomBar(currentRoute)) {
+            // isImeVisible 只能在这里读：它是 @Composable 的，进不了
+            // showsBottomBar 的纯逻辑（那函数有 JVM 测试，见 Routes.kt 的说明）。
+            if (showsBottomBar(currentRoute, imeVisible = WindowInsets.isImeVisible)) {
                 NovelForgeBottomBar(
                     current = TopLevelDestination.fromRoute(currentRoute)
                         ?: TopLevelDestination.Books,
@@ -180,9 +220,11 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                 LibraryScreen(
                     viewModel = libraryViewModel,
                     onContinueWriting = openProject,
-                    onOpenCreate = { navController.navigate(Routes.CREATE) },
-                    onBack = { navController.popBackStack() }
+                    onOpenCreate = { navController.navigate(Routes.CREATE) }
                 )
+                // 回填给底栏，让「书架」tab 能把书关掉。用 SideEffect 而不是直接赋值：
+                // 组合阶段写普通变量在重组顺序变化时可能读到半成品。
+                SideEffect { booksTab.viewModel = libraryViewModel }
             }
 
             // ————————————————————————————————————————————

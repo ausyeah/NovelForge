@@ -97,8 +97,34 @@ enum class TopLevelDestination(val route: String, val label: String, val glyph: 
  *
  * 书内的大纲页和本书记忆则保留底栏：它们的父级就是「书架」这个 tab，
  * 保留底栏才能一步跳回书架，而不用先退出这本书。
+ *
+ * ## 输入法弹起时一律隐藏（`imeVisible`）
+ *
+ * 这一条不是审美选择，是修一个实打实的布局 bug。
+ *
+ * 根因是三层高度对不上：
+ * - Scaffold 把 bottomBar 的高度算进 `innerPadding`，于是 NavHost 的内容区
+ *   变成「窗口高 − 底栏高」；
+ * - 底栏自己**没有**加 imePadding，所以它被画在窗口最底部 —— 也就是**键盘底下**，
+ *   用户根本看不见；
+ * - 页面（比如 `ChatScreen`）在内容 Column 上加 `imePadding()`，把输入框压到
+ *   「窗口高 − 底栏高 − 键盘高」的位置。
+ *
+ * 而键盘顶边在「窗口高 − 键盘高」。两个一减，**输入框和键盘之间正好空出
+ * 一个底栏的高度**（约 80dp）。用户看到的就是「输入框浮在半空，够不着键盘」。
+ *
+ * 底栏在这个状态下既看不见也点不着，却仍然在占高度 —— 所以弹起输入法时直接
+ * 不显示它：少一层没人看得见的控件，输入框贴回键盘，消息区还多出 80dp。
+ *
+ * 受影响的不止聊天：设置（API Key / Base URL）、大纲（改标题概要）、
+ * 本书记忆（一堆输入框）都是「有底栏 + 有输入框」，同一个 bug。
+ *
+ * 安全性：这些页面顶栏都有「返回」，所以隐藏底栏不会让用户失去可见的退路。
+ * 唯一没有顶栏返回可用的是书架页，而书架页没有输入框，这条规则对它不生效。
+ * （**如果以后把书架页那个没用的返回也删了，这条安全性论证要重写。**）
  */
-fun showsBottomBar(route: String?): Boolean {
+fun showsBottomBar(route: String?, imeVisible: Boolean = false): Boolean {
+    if (imeVisible) return false
     if (route == null) return true
     // 只看第一段路径。这里必须按「填充后的实际路由」判断，
     // 所以不能拿 Routes.OUTLINE（"outline/{projectId}" 这个 pattern）去比 ——

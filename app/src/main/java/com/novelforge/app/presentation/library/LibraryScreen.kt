@@ -504,8 +504,7 @@ internal fun resolveReadingChapter(
 fun LibraryScreen(
     viewModel: LibraryViewModel,
     onContinueWriting: (Project) -> Unit,
-    onOpenCreate: () -> Unit,
-    onBack: () -> Unit
+    onOpenCreate: () -> Unit
 ) {
     val projects by viewModel.projects.collectAsStateWithLifecycle()
     val novel by viewModel.novel.collectAsStateWithLifecycle()
@@ -765,7 +764,20 @@ fun LibraryScreen(
                 }
             }
             projects.isEmpty() -> {
-                PaperTopBar(title = "书架", onBack = onBack)
+                // 书架是 startDestination，这里**不能**有返回。
+                //
+                // 原来这里传的是 `navController.popBackStack()`，看着像"没东西可弹、
+                // 按了等于没按"—— 我之前也是这么说的，**错的**。查了 Navigation 2.8.5
+                // 的源码：`popBackStack()` 走的是 `inclusive = true`
+                // （NavController.kt:450-457），所以它会先弹掉 books，再把仅剩的
+                // 根图也弹掉（NavController.kt:1068-1070），backQueue 直接变空。
+                // 于是 `NavHost` 的 `visibleEntries.lastOrNull()` 是 null，整个
+                // NavHost 一个节点都不发射 —— **白屏，底栏还在，导航图已销毁**，
+                // 只能杀掉应用重开。
+                //
+                // 而且这是 app 里用得最多的屏幕上一次点击就能触发的路径。
+                // 现在没有返回可点；系统返回手势仍然能退出应用，那本来就是对的。
+                PaperTopBar(title = "书架")
                 Text(
                     "还没有小说。请先填写名称，题材与大纲可在下一步设置。",
                     style = MaterialTheme.typography.bodyMedium,
@@ -781,10 +793,11 @@ fun LibraryScreen(
                 )
             }
             else -> {
+                // 同上：startDestination 不能有返回（popBackStack inclusive=true 会
+                // 把 backQueue 弹空 → 白屏 + 导航图销毁）。理由见空书架那一处。
                 PaperTopBar(
                     title = "书架",
-                    subtitle = "点击封面写作，长按可阅读、备份、重命名",
-                    onBack = onBack
+                    subtitle = "点击封面写作，长按可阅读、备份、重命名"
                 )
                 backupMessage?.let {
                     Text(it, style = MaterialTheme.typography.bodySmall)

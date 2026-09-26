@@ -1,12 +1,17 @@
 package com.novelforge.app.presentation.navigation
 
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -74,11 +79,23 @@ object Routes {
     private val HEX = "0123456789ABCDEF".toCharArray()
 }
 
-/** 底部栏的三个目的地。数量按 Material 的 3–5 个来定。 */
-enum class TopLevelDestination(val route: String, val label: String, val glyph: String) {
-    Books(Routes.BOOKS, "书架", "▤"),
-    Chat(Routes.CHAT, "灵感", "✎"),
-    Settings(Routes.SETTINGS, "设置", "⚙");
+/**
+ * 底部栏的三个目的地。数量按 Material 的 3–5 个来定。
+ *
+ * [label] 是**给人读的**名字：画在无障碍 `contentDescription` 上，不再当图标用。
+ * [icon] 是给眼睛看的 24dp 矢量图标，取自 `material-icons-core`（零新依赖）。
+ */
+enum class TopLevelDestination(
+    val route: String,
+    val label: String,
+    val icon: ImageVector
+) {
+    // ▤ → Icons.List：三条横线读起来就是一排书脊
+    Books(Routes.BOOKS, "书架", Icons.AutoMirrored.Filled.List),
+    // ✎ → Icons.Edit：铅笔，对应「写点什么」
+    Chat(Routes.CHAT, "灵感", Icons.Filled.Edit),
+    // ⚙ → Icons.Settings：唯一一个语义完全一致的
+    Settings(Routes.SETTINGS, "设置", Icons.Filled.Settings);
 
     companion object {
         /**
@@ -149,17 +166,28 @@ fun NovelForgeBottomBar(
                 selected = current == destination,
                 onClick = { onSelect(destination) },
                 icon = {
-                    // **不传 label**：底部一排只要三个图标，不要文字
-                    // （用户原话：「最下面一排只需要有三个图标就行了，不要文字」）。
+                    // **用矢量图标，不用文字排版符号。**
                     //
-                    // 文字拿掉之后无障碍读屏就听不出这是哪一栏了 —— `▤` / `✎` / `⚙`
-                    // 对 TalkBack 来说是没有意义的符号。所以 label 字符串从可见文本
-                    // 降级成 contentDescription，**内容一个字没少，只是不再画出来**。
-                    Text(
-                        text = destination.glyph,
-                        modifier = Modifier.semantics {
-                            contentDescription = destination.label
-                        }
+                    // 原来是 `Text("▤")` / `Text("✎")` / `Text("⚙")`。两个问题：
+                    // 1. `▤` `✎` `⚙` 都在 Unicode 的「杂项符号」区，**不是所有
+                    //    OEM 字体都收**。缺字形时 Android 画一个豆腐块 □，
+                    //    而且没有任何编译期或运行期告警 —— 只在用户那台机器上出现。
+                    // 2. 按 `bodyLarge` = 16sp 画进 M3 的 **24dp 图标槽**，字形
+                    //    撑不满也居不准，看起来像「图标没加载出来」。
+                    //
+                    // `material-icons-core` 里就有现成的（Settings / Edit / List），
+                    // **不需要新依赖** —— 它已经是 material3 的传递依赖。
+                    // 菜单/书籍类图标（MenuBook / AutoStories）在 icons-extended 里，
+                    // 那个包我们没有，所以在这里能用的就这三个。
+                    Icon(
+                        imageVector = destination.icon,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .size(24.dp)
+                            // 文字拿掉之后无障碍读屏就听不出这是哪一栏了 ——
+                            // 图标本身没有名字。所以 label 字符串从可见文本降级成
+                            // contentDescription：**内容一个字没少，只是不再画出来。**
+                            .semantics { contentDescription = destination.label }
                     )
                 },
                 label = null,

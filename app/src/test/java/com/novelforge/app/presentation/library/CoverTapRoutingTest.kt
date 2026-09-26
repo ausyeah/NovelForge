@@ -140,29 +140,47 @@ class CoverTapRoutingTest {
     }
 
     /**
-     * 顶栏副标题和长按菜单不能还在说旧的手势。
+     * 书架这一屏不许出现会骗人的手势说明。
      *
-     * 它写着「点击封面写作」而代码已经是点封面阅读 —— 用户按提示做，结果和
-     * 提示相反。README 里同一句话也有一份。
+     * ## 这条测试改过一次，因为它守的东西变了
+     *
+     * 原来它要求「副标题必须存在，而且要说清楚长按是干什么的」。副标题当时写的是
+     * 「点封面阅读，长按可写作、换封面、重命名、删除」，测试只查了它**没**说
+     * 「点击封面写作」，就放行了 ——
+     *
+     * **但那句话本身就是错的**：点封面现在只打开目录，不跳阅读器。
+     * 于是测试绿灯，界面在骗人。用户照着提示做，得到的结果和提示相反。
+     *
+     * 测试只查了「没写错的那一种写法」，没查「写的是不是对的」。
+     *
+     * 现在副标题**整条删掉了**，这比改对文案更彻底：长按是平台惯例，
+     * 而用户在别的页面已经明确说过不需要这种逐项操作提示。
+     * 于是判据从「文案对不对」变成「**根本没有文案**」——
+     * 一个不存在的句子不可能说错话。
      */
     @Test
-    fun theShelfSubtitleMatchesTheActualGestures() {
-        val source = libraryScreen()
-        val code = stripComments(source)
-        val subtitle = Regex("subtitle\\s*=\\s*\"([^\"]*封面[^\"]*)\"")
-            .find(code)?.groupValues?.get(1)
+    fun theShelfRendersNoGestureInstructionsAtAll() {
+        val code = stripComments(libraryScreen())
+        // **只看书架这一屏。** 第一版断言的是「整个文件里没有 subtitle」，
+        // 结果目录页那个正经的「已生成 N/M 章」把它判死了 —— 判据比意图宽，
+        // 抓到了不该抓的东西。判据必须和它在守的那件事一样窄。
+        val start = code.indexOf("""PaperTopBar(title = "书架")""")
+        assertTrue("没找到书架顶栏", start >= 0)
+        val shelf = code.substring(start, minOf(code.length, start + 400))
+
+        val subtitle = Regex("subtitle\\s*=\\s*\"([^\"]*)\"")
+            .find(shelf)?.groupValues?.get(1)
         assertTrue(
-            "书架顶栏没有一条提到封面的副标题了 —— 那条是唯一说明手势的地方",
-            subtitle != null
+            "书架顶栏又挂上了操作提示副标题：$subtitle。" +
+                "它之前教用户「点封面阅读」，而点封面只打开目录 —— 提示是假的。",
+            subtitle == null
         )
-        assertTrue(
-            "副标题还在说「点封面写作」，但代码已经改成点封面阅读：$subtitle",
-            !subtitle!!.contains("点击封面写作")
-        )
-        assertTrue(
-            "副标题该说清楚长按是干什么的（用户已经反馈过一次长按的问题）：$subtitle",
-            subtitle.contains("长按")
-        )
+        for (phrase in listOf("点封面", "长按可", "点击封面")) {
+            assertFalse(
+                "书架这一屏又出现了操作提示「$phrase」：\n$shelf",
+                shelf.contains(phrase)
+            )
+        }
     }
 }
 
@@ -196,22 +214,63 @@ private fun codeSourceDir(): File? = try {
     null
 }
 
-private fun stripComments(source: String): String = buildString {
-    source.lineSequence().forEach { line ->
-        var inString = false
-        var cut = line.length
-        var i = 0
-        while (i < line.length) {
-            val c = line[i]
-            when {
-                c == '\\' && inString -> i++
-                c == '"' -> inString = !inString
-                !inString && c == '/' && i + 1 < line.length && line[i + 1] == '/' -> {
-                    cut = i; i = line.length
+/**
+ * 剥掉注释，**块注释和行注释都要剥**。
+ *
+ * 原来这里只处理 `//`，`/** ... */` 整块留下了 —— 而这个文件里绝大多数
+ * 解释性文字（包括那句骗人的「点封面阅读」为什么被删）都写在 KDoc 里。
+ *
+ * 后果不是「测试没抓到 bug」，而是**测试抓错了东西**：
+ * 「副标题不许说错手势」那条断言去数 KDoc 里的字，而不是数真正渲染出来的字。
+ * 之前它绿灯通过，恰恰是因为真正的副标题是错的、而它查的是注释。
+ *
+ * 教训：**断言工具本身不完整时，绿色不代表结论成立**，只代表没人核对过工具。
+ */
+private fun stripComments(source: String): String {
+    val out = StringBuilder(source.length)
+    var i = 0
+    var inBlock = false
+    while (i < source.length) {
+        val c = source[i]
+        val n = if (i + 1 < source.length) source[i + 1] else ' '
+        when {
+            inBlock -> {
+                if (c == '*' && n == '/') {
+                    inBlock = false
+                    i += 2
+                } else {
+                    i++
                 }
             }
-            if (i < line.length) i++
+            c == '/' && n == '*' -> {
+                inBlock = true
+                i += 2
+            }
+            c == '/' && n == '/' -> {
+                val end = source.indexOf('\n', i)
+                i = if (end < 0) source.length else end
+            }
+            c == '"' -> {
+                // 字符串字面量整体抄过去，注释标记在引号里不算注释
+                out.append(c)
+                i++
+                while (i < source.length) {
+                    val d = source[i]
+                    out.append(d)
+                    if (d == '\\' && i + 1 < source.length) {
+                        out.append(source[i + 1])
+                        i += 2
+                        continue
+                    }
+                    i++
+                    if (d == '"') break
+                }
+            }
+            else -> {
+                out.append(c)
+                i++
+            }
         }
-        append(line, 0, cut).append('\n')
     }
+    return out.toString()
 }

@@ -41,7 +41,69 @@ import java.io.File
  */
 class BottomBarIconOnlyTest {
 
-    private val routesSrc = sourceOf("presentation/navigation/Routes.kt")
+    /**
+     * 断言前先剥掉注释 —— 否则这条测试会匹配到**它自己的解释性注释**。
+     *
+     * 底部栏那段注释里就写着「原来是 `Text("▤")` / `Text("✎")` / `Text("⚙")`」，
+     * 于是「不许再出现这三个字符」这条规则被自己的注释判死。
+     * 这和「断言去比对被 sabotage 改的那个常量」是同一类错误：断言匹配到的
+     * 不是它声称在匹配的东西，于是它对什么都会红、或者对什么都不红。
+     */
+    private val routesSrc = stripComments(
+        File("src/main/java/com/novelforge/app/presentation/navigation/Routes.kt")
+            .readText(Charsets.UTF_8)
+    )
+
+    /**
+     * 剥掉注释（手写扫描，不用正则）。
+     *
+     * 不用正则有两个原因：`RegexOption.DOT_MATCH_ALL` 在这个工程的
+     * Kotlin 版本下解析不了；而且 `/* */` 跨行、`//` 到行尾这两条规则
+     * 手写扫描更不容易写错 —— 断言工具本身出错的话，失败信息会指向
+     * 完全无关的方向。
+     */
+    private fun stripComments(text: String): String {
+        val sb = StringBuilder(text.length)
+        var i = 0
+        var inString = false
+        while (i < text.length) {
+            val c = text[i]
+            val n = if (i + 1 < text.length) text[i + 1] else ' '
+            when {
+                inString -> {
+                    sb.append(c)
+                    if (c == '\\') {
+                        if (i + 1 < text.length) sb.append(text[i + 1])
+                        i += 2
+                        continue
+                    }
+                    if (c == '"') inString = false
+                    i++
+                }
+                // 字符串字面量：注释标记在引号里不算注释
+                c == '"' -> {
+                    inString = true
+                    sb.append(c)
+                    i++
+                }
+                c == '/' && n == '*' -> {
+                    val end = text.indexOf("*/", i + 2)
+                    i = if (end < 0) text.length else end + 2
+                    sb.append(' ')
+                }
+                c == '/' && n == '/' -> {
+                    val end = text.indexOf('\n', i)
+                    i = if (end < 0) text.length else end
+                    sb.append(' ')
+                }
+                else -> {
+                    sb.append(c)
+                    i++
+                }
+            }
+        }
+        return sb.toString()
+    }
 
     private fun bottomBar(): String {
         val start = routesSrc.indexOf("fun NovelForgeBottomBar(")
@@ -75,9 +137,23 @@ class BottomBarIconOnlyTest {
             "底部栏应当遍历全部三个目的地：\n$bar",
             bar.contains("TopLevelDestination.entries.forEach")
         )
-        for (d in TopLevelDestination.entries) {
-            assertTrue("目的地 ${d.name} 没有图标字符", d.glyph.isNotBlank())
+        // 图标必须是**矢量**，不是文字。
+        //
+        // 原来是 `Text("▤")` / `Text("✎")` / `Text("⚙")` —— 这三个字符都在
+        // Unicode 的杂项符号区，**不是所有 OEM 字体都收**。缺字形时 Android
+        // 画一个豆腐块 □，而且没有编译期也没有运行期告警，只在用户那台机器上出现。
+        // 而且按 bodyLarge = 16sp 画进 M3 的 24dp 图标槽，字形撑不满也居不准。
+        val glyphs = listOf("▤", "✎", "⚙")
+        for (g in glyphs) {
+            assertFalse(
+                "底栏又用回文字符号 `$g` 当图标了（可能缺字形变豆腐块）",
+                bar.contains("Text(destination.glyph)") || routesSrc.contains("\"$g\"")
+            )
         }
+        assertTrue(
+            "底栏应当用 Icon(imageVector = destination.icon)",
+            bar.contains("imageVector = destination.icon")
+        )
     }
 
     @Test
@@ -96,11 +172,15 @@ class BottomBarIconOnlyTest {
     }
 
     @Test
-    fun noDestinationGlyphIsEmptyOrWhitespace() {
-        // 图标是唯一可见的东西了，空图标 = 底栏出现一个点不开的空格。
-        for (d in TopLevelDestination.entries) {
-            assertFalse("目的地 ${d.name} 的图标是空白", d.glyph.isBlank())
-        }
+    fun everyDestinationHasADistinctVectorIcon() {
+        // 图标是底栏唯一可见的东西了。三个目的地给同一个图标，
+        // 用户只能靠位置分辨 —— 而三个 tab 的顺序不是约定俗成的。
+        val icons = TopLevelDestination.entries.map { it.icon }
+        assertEquals(
+            "三个目的地的图标必须各不相同，实际：$icons",
+            icons.size,
+            icons.toSet().size
+        )
     }
 
     private fun sourceOf(relative: String): String {

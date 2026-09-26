@@ -13,12 +13,16 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -27,9 +31,13 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -49,15 +57,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.ViewModel
@@ -66,15 +81,14 @@ import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.novelforge.app.data.cover.BookCover
 import com.novelforge.app.domain.model.Project
+import com.novelforge.app.domain.model.ProjectStatus
 import com.novelforge.app.domain.model.label
 import com.novelforge.app.domain.repository.ChapterRepository
 import com.novelforge.app.domain.repository.OutlineRepository
 import com.novelforge.app.domain.repository.ProjectRepository
 import com.novelforge.app.presentation.common.PaperTopBar
-import com.novelforge.app.presentation.common.StatusChip
 import com.novelforge.app.presentation.common.chapterLabel
 import com.novelforge.app.presentation.common.cleanChapterTitle
-import com.novelforge.app.presentation.common.formatUpdatedAgo
 import com.novelforge.app.ui.theme.PaperButton
 import com.novelforge.app.ui.theme.PaperSurface
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -141,6 +155,14 @@ class LibraryViewModel(
      * 正文进去必炸（`lastReadIndex` 上面那个注释是同一个道理）。
      */
     private val _writtenCounts = MutableStateFlow<Map<String, Int>>(emptyMap())
+
+    /**
+     * 给封面格显示「N 章」用的只读视图。
+     *
+     * 单开一个 Flow 而不是塞进书单：合流的话每写完一章都要重建整份书单，
+     * 而重建 `projects` 会连带把整个网格的 key 换掉。
+     */
+    val writtenCounts: StateFlow<Map<String, Int>> = _writtenCounts.asStateFlow()
 
     /** 有正文的章数；没有记录的书按 0 算（没正文）。 */
     fun writtenCount(projectId: String): Int = _writtenCounts.value[projectId] ?: 0
@@ -451,6 +473,26 @@ private val COVER_COLORS = listOf(
     Color(0xFF3E5C8A), Color(0xFF7A3E5C), Color(0xFF5C7A3E)
 )
 
+/**
+ * 网格的三个尺寸常量。**它们必须相等：间距 == 圆角。**
+ *
+ * 12dp 不是随便挑的：M3 的三种卡片（filled / elevated / outlined）
+ * ContainerShape 全都是 `CornerMedium` = 12dp，而 10dp 根本不在 M3 的
+ * 形状刻度（4 / 8 / 12 / 16 / 28）上。原来间距和圆角都是 10dp ——
+ * 数值上相等纯属碰巧，不是因为它在任何刻度上。
+ *
+ * 「间距 == 圆角」是 M3 最容易被认出来的观感：相邻两块之间的缝和它们
+ * 各自的转角一样宽，看起来才像同一套东西。
+ */
+private val COVER_RADIUS = 12.dp
+private val COVER_GUTTER = 12.dp
+
+/** 左右留白取 16dp —— M3 列表的 leading/trailing space，让这个网格和 App 里其他列表对齐。 */
+private val SHELF_PADDING = 16.dp
+
+/** 封面内文字离边的距离。上下都留这么多，文字块在光学上居中。 */
+private val COVER_INSET = 12.dp
+
 private fun abs(value: Int): Int = if (value == Int.MIN_VALUE) 0 else if (value < 0) -value else value
 
 /**
@@ -461,11 +503,36 @@ private fun abs(value: Int): Int = if (value == Int.MIN_VALUE) 0 else if (value 
  * 读不出来就落回颜色，绝不留一块空白。
  */
 @OptIn(ExperimentalFoundationApi::class)
+/**
+ * 封面格。
+ *
+ * **一格就是一张卡，一种解剖。** 整个网格里不允许出现第二种卡片长相 ——
+ * 之前那个米色「继续写作」大卡和这个封面格除了 10dp 圆角以外没有任何共同属性，
+ * 一屏看着像两个 App 拼起来的（NN/g 一致性准则：同一集合里的项必须看起来同族）。
+ *
+ * ## 三个具体的取舍
+ *
+ * **1. 书名在底部，不在顶部。** 之前书名在顶、状态在底，中间一大块是空的，
+ * 而为了在**顶部**放白字，还得给整张封面上半部分压一层 `alpha=0.45` 的暗色 ——
+ * 那是全屏最大的一块无谓损耗，封面最该露出来的上半部分反而被盖住了。
+ * 标题挪到底之后，一层自下而上的渐变就够，上面 40% 干干净净全是画面。
+ * 起点读书自己的复盘也是这个结论：网封色块对比弱，解法是**缩封面、加大图与留白的对比**。
+ *
+ * **2. 状态行永远占位 16dp。** 状态是从「筹备中」变成「生成大纲中」再变成「连载中」，
+ * 如果只在有状态时才画那一行，整列卡片会随状态变高变低，网格会抖。
+ * 永远占位 = 卡片高度只由封面比例决定，状态变化不引起重排。
+ *
+ * **3. 只有 `OUTLINING` 才是真在跑。** 五个状态里「生成大纲中」是唯一有活儿在干的，
+ * 其余四个（筹备中/连载中/已完结/已归档）只是状态，不该跟它一样重。
+ * 所以只有它在底部画一条 2dp 的进度线 —— 一格 158dp 宽的卡上，
+ * 一条会动的 2dp 线是全部的动态预算。卡片本身不许动。
+ */
 @Composable
 private fun BookCoverTile(
     project: Project,
     cover: BookCover,
     fallbackColor: Color,
+    writtenCount: Int?,
     onThumbnail: suspend () -> android.graphics.Bitmap?,
     onClick: () -> Unit,
     onLongClick: () -> Unit
@@ -475,11 +542,12 @@ private fun BookCoverTile(
             value = runCatching { onThumbnail() }.getOrNull()
         }
     }
+    val running = project.status == ProjectStatus.OUTLINING
     Box(
         modifier = Modifier
             .fillMaxWidth()
             .aspectRatio(0.72f)
-            .clip(RoundedCornerShape(10.dp))
+            .clip(RoundedCornerShape(COVER_RADIUS))
             .background(fallbackColor)
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
     ) {
@@ -491,37 +559,184 @@ private fun BookCoverTile(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
-            // 自定义图上也要压一层暗色，不然浅色封面上的白字读不出来
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.verticalGradient(
-                            0f to Color.Black.copy(alpha = 0.45f),
-                            0.5f to Color.Transparent,
-                            1f to Color.Black.copy(alpha = 0.55f)
-                        )
-                    )
-            )
         }
-        Column(
+        // **只压底部。** 之前是三段渐变、顶部 0.45 alpha，用来在顶部放白字；
+        // 标题挪到底之后顶部不需要任何遮罩。
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.SpaceBetween
+                .background(
+                    Brush.verticalGradient(
+                        0.35f to Color.Transparent,
+                        1f to Color.Black.copy(alpha = 0.62f)
+                    )
+                )
+        )
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .fillMaxWidth()
+                .padding(COVER_INSET),
+            verticalArrangement = Arrangement.spacedBy(2.dp)
         ) {
             Text(
                 project.title,
                 color = Color.White,
-                fontWeight = FontWeight.Bold,
-                maxLines = 3,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
-                style = MaterialTheme.typography.titleMedium
+                style = MaterialTheme.typography.titleMedium,
+                // Material 的 tracking 是给拉丁字母调的。中文是密排 ——
+                // 「字间距大的文章，阅读速度会变慢」（中文排印三原则·原则一）。
+                // 16sp 下 M3 titleMedium 默认带 0.2sp，必须显式清零。
+                letterSpacing = TextUnit.Unspecified
             )
+            // 永远占位，状态变化不引起卡片重排
             Text(
                 project.status.label(),
                 color = Color.White.copy(alpha = 0.85f),
-                style = MaterialTheme.typography.bodySmall
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.labelMedium,
+                letterSpacing = TextUnit.Unspecified
+            )
+            if (writtenCount != null && writtenCount > 0) {
+                Text(
+                    "$writtenCount 章",
+                    color = Color.White.copy(alpha = 0.72f),
+                    maxLines = 1,
+                    style = MaterialTheme.typography.labelMedium,
+                    letterSpacing = TextUnit.Unspecified
+                )
+            }
+        }
+        if (running) {
+            // 2dp 细线，贴在卡片底边内侧（跟着 12dp 圆角裁）。
+            // M3 的 TrackThickness 是 4dp；158dp 宽的卡上 4dp 太重，2dp 刚好。
+            Row(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .fillMaxWidth()
+                    .height(2.dp)
+                    .background(Color.Black.copy(alpha = 0.28f))
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(0.34f)
+                        .fillMaxSize()
+                        .background(Color.White.copy(alpha = 0.92f))
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 网格上方那一行「继续写」。
+ *
+ * 一行，不是一张卡。刻意做成**没有嵌套控件**的样子：整行就是一个点区。
+ * 之前那张卡是可点的卡里套了一个实心红按钮，按钮上还重复了一遍书名 ——
+ * 卡里套控件是「这看起来像个表单」最强的信号，而重复的书名让这一屏
+ * 出现了三处同一个标题。
+ *
+ * 高度 72dp = M3 双行列表的高度（56/72/88 三档里的中间那档）。
+ */
+@Composable
+private fun ResumeRow(
+    title: String,
+    chapter: String?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(72.dp)
+            .clip(RoundedCornerShape(COVER_RADIUS))
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "继续写作",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                letterSpacing = TextUnit.Unspecified
+            )
+            Text(
+                title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                letterSpacing = TextUnit.Unspecified
+            )
+            if (chapter != null) {
+                Text(
+                    "续读：$chapter",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    letterSpacing = TextUnit.Unspecified
+                )
+            }
+        }
+        Icon(
+            // AutoMirrored：RTL 布局下箭头要跟着翻。Material 现在会把
+            // 非 automirrored 版本标成 deprecated。
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+/** 网格里「新建小说」那一格：跟封面格同尺寸同圆角，虚线边。 */
+@Composable
+private fun NewBookTile(onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val outline = MaterialTheme.colorScheme.outlineVariant
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .aspectRatio(0.72f)
+            .clip(RoundedCornerShape(COVER_RADIUS))
+            .background(MaterialTheme.colorScheme.surface)
+            .clickable(onClick = onClick)
+            // 虚线边框。foundation 的 `Modifier.border` 只有实线，虚线得自己画 ——
+            // 零新依赖的做法是 drawBehind + Stroke + dashPathEffect。
+            .drawBehind {
+                drawRoundRect(
+                    color = outline,
+                    style = Stroke(
+                        width = 1.5.dp.toPx(),
+                        pathEffect = PathEffect.dashPathEffect(
+                            floatArrayOf(7.dp.toPx(), 6.dp.toPx())
+                        )
+                    ),
+                    cornerRadius = CornerRadius(COVER_RADIUS.toPx())
+                )
+            }
+            .semantics { contentDescription = "新建小说" },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Add,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(24.dp)
+            )
+            Text(
+                "新建小说",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                letterSpacing = TextUnit.Unspecified
             )
         }
     }
@@ -551,6 +766,9 @@ fun LibraryScreen(
     val projects by viewModel.projects.collectAsStateWithLifecycle()
     val novel by viewModel.novel.collectAsStateWithLifecycle()
     val lastReadIndex by viewModel.lastReadIndex.collectAsStateWithLifecycle()
+    // 封面格上的「N 章」。单独订阅而不是每次 onClick 现查 ——
+    // 现查的话封面上的数字不会随写完一章而更新。
+    val writtenCounts by viewModel.writtenCounts.collectAsStateWithLifecycle()
     val current = novel
     // 只记序号，不记章节对象：LibraryChapter 带着整章正文，进 Bundle 在长章节上会撞
     // Binder 的 1MB 上限（TransactionTooLarge）；正文本来就能从 chapters 里按序号再取一次。
@@ -823,99 +1041,112 @@ fun LibraryScreen(
                 // 而且这是 app 里用得最多的屏幕上一次点击就能触发的路径。
                 // 现在没有返回可点；系统返回手势仍然能退出应用，那本来就是对的。
                 PaperTopBar(title = "书架")
-                Text(
-                    "还没有小说。请先填写名称，题材与大纲可在下一步设置。",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                // 这里原来写的是「先回主页新建一本」—— 主页已经没了，
-                // 等于把用户支到一个不存在的界面；入口就地放在这里
-                PaperButton(
-                    "新建小说",
-                    onOpenCreate,
-                    modifier = Modifier.fillMaxWidth(),
-                    accent = true
-                )
+                // 空书架原来只有两行字加一个全宽按钮，**顶在屏幕最上面**，
+                // 下面是一整片空白。空状态的意义是「这里该有东西」，
+                // 所以它得先占住视觉重心。
+                //
+                // 但**不预置一个虚线封面格**：那是「已经有一本书、只是没设封面」，
+                // 跟「一本书都没有」不是一回事，空书架假装有一本会更误导。
+                //
+                // 按 M3 的说法（列表引导 16dp），按钮也收窄 —— 全宽按钮在空屏上
+                // 读起来像个等着被填的输入框，160dp 居中的那个才读起来像动作。
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(horizontal = 32.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        "书架还空着",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = TextUnit.Unspecified
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "写下第一本",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        letterSpacing = TextUnit.Unspecified
+                    )
+                    Spacer(Modifier.height(20.dp))
+                    PaperButton(
+                        "新建小说",
+                        onOpenCreate,
+                        modifier = Modifier.width(160.dp),
+                        accent = true
+                    )
+                }
             }
             else -> {
                 // 同上：startDestination 不能有返回（popBackStack inclusive=true 会
                 // 把 backQueue 弹空 → 白屏 + 导航图销毁）。理由见空书架那一处。
-                PaperTopBar(
-                    title = "书架",
-                    subtitle = "点封面阅读，长按可写作、换封面、重命名、删除"
-                )
-                backupMessage?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall)
-                    TextButton(onClick = { backupMessage = null }) { Text("关闭") }
+                //
+                // **不挂 subtitle。** 原来那句「点封面阅读，长按可写作、换封面、
+                // 重命名、删除」有两个问题：它**是错的**（点封面现在只打开目录，
+                // 不跳阅读器，见下面 onClick 的注释），它教用户去做一件不会发生的事；
+                // 而且这就是我自己在正文页清掉的「每页一条重复操作提示」，
+                // 在页面尺度上又长回来一次。长按是平台惯例，不需要教。
+                PaperTopBar(title = "书架")
+                // 「继续写」从网格里搬出来了。
+                //
+                // 之前它是 `item(key = "hero-continue")`，也就是 **2 列网格里的
+                // 单独一格** —— 一格占半行，右边空一半。而且那张卡上的书名
+                // 出现了三次（小标签「继续写作」/ 标题 / 按钮「继续写作《书名》」），
+                // 底下还嵌了一个实心红按钮：一个可点的卡里面再套一个可点的控件，
+                // 这是「这看起来像个表单」最强的信号。
+                //
+                // 现在是一行 72dp 的整行条（= M3 双行列表的高度），放在网格**外面**。
+                // 一屏只有一个续读入口，不在网格里，不重复书名，也没有嵌套控件。
+                // Kindle / Apple Books 的「继续读」也是这么摆的：网格是**认得出书**
+                // 的地方，续读是**回到刚才那一本**的动作，两件事分开。
+                hero?.let { target ->
+                    ResumeRow(
+                        title = target.title,
+                        chapter = lastReadIndex[target.id]?.let { chapterLabel(it) },
+                        onClick = {
+                            if (lastReadIndex[target.id] != null) {
+                                pendingReadId = target.id
+                            }
+                            viewModel.open(target)
+                        },
+                        modifier = Modifier.padding(
+                            start = SHELF_PADDING,
+                            end = SHELF_PADDING,
+                            top = 4.dp,
+                            bottom = 4.dp
+                        )
+                    )
                 }
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(2),
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    // M3 的招牌观感：**间距 == 圆角**。原来间距 10dp、圆角 10dp
+                    // 是「碰巧相等」，而 10dp 根本不在 M3 的形状刻度
+                    // （4/8/12/16/28）上。12dp 是 M3 三种卡片（filled/elevated/
+                    // outlined）共同的 ContainerShape = CornerMedium。
+                    horizontalArrangement = Arrangement.spacedBy(COVER_GUTTER),
+                    verticalArrangement = Arrangement.spacedBy(COVER_GUTTER),
+                    contentPadding = PaddingValues(
+                        start = SHELF_PADDING,
+                        end = SHELF_PADDING,
+                        top = 8.dp,
+                        // 底部留白：让最后一排卡片不贴着系统导航条
+                        bottom = 24.dp
+                    )
                 ) {
-                    // 顶部「继续写」：整个 App 最该被点到的一格。
-                    // 旧首页有这张卡，首页并进来之后由这里顶上，
-                    // 否则「接着写」要先在两列封面里认书名。
-                    hero?.let { target ->
-                        item(key = "hero-continue") {
-                            PaperSurface(modifier = Modifier.fillMaxWidth()) {
-                                Column(
-                                    modifier = Modifier.padding(16.dp),
-                                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                                ) {
-                                    Text(
-                                        "继续写作",
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                    Text(
-                                        target.title,
-                                        style = MaterialTheme.typography.titleLarge,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                    Row(
-                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        StatusChip(target.status.label())
-                                        Text(
-                                            formatUpdatedAgo(target.updatedAt),
-                                            style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                    PaperButton(
-                                        "继续写作《${target.title}》",
-                                        onClick = { onContinueWriting(target) },
-                                        modifier = Modifier.fillMaxWidth(),
-                                        accent = true
-                                    )
-                                    // 续读是精确入口：直接落到上次读到的那一章。
-                                    // 点它先开书，目录到齐后由上面的 LaunchedEffect 落到那一章。
-                                    // （点封面已经改成「去读」了，这里给的是「读哪一章」——
-                                    //  两件事，封面给前者，这个给后者。）
-                                    lastReadIndex[target.id]?.let { resumeOrder ->
-                                        TextButton(
-                                            onClick = {
-                                                pendingReadId = target.id
-                                                viewModel.open(target)
-                                            },
-                                            modifier = Modifier.fillMaxWidth()
-                                        ) {
-                                            Text(
-                                                "▶ 续读：${chapterLabel(resumeOrder)}",
-                                                style = MaterialTheme.typography.bodySmall
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    // 「新建小说」是网格里的**第一格**，不是底部一个全宽按钮。
+                    // 原来那个按钮浮在一大片死空间里（网格拿 weight(1f)，
+                    // 只有两行内容，剩下的全空，按钮被推到最底下一个描边长条，
+                    // 看着像没填完的表单）。放进网格第一格之后：位置 0 在
+                    // 3–8 本书的量级下永远不用滚就能看见，而且它和封面格
+                    // 同尺寸同圆角，视觉上属于这一屏。
+                    item(key = "new-book") {
+                        NewBookTile(onClick = onOpenCreate)
                     }
                     items(projects, key = { it.id }) { project ->
                         val cover = covers[project.id] ?: BookCover.Default
@@ -927,8 +1158,9 @@ fun LibraryScreen(
                             project = project,
                             cover = cover,
                             fallbackColor = fallback,
+                            writtenCount = writtenCounts[project.id],
                             onThumbnail = { viewModel.coverThumbnail(project.id) },
-                            // 点封面 = 读。**只打开这本书的目录**，不自动跳进阅读器。
+                            // 点封面 = 进这本书的**目录**。不自动跳进阅读器。
                             //
                             // 这里原来还多接了一句 `pendingReadId = project.id`，
                             // 于是点封面会直接进阅读器并落在上次读到的那一章。
@@ -937,8 +1169,7 @@ fun LibraryScreen(
                             //
                             // 想要「读上次那一章」是另一个动作，书内目录顶部就有
                             // 「▶ 续读：第 N 章」那个按钮（见下面的 resumeChapter），
-                            // 那才是明确说「续读」的地方。封面这一下给的是
-                            // 「进这本书」，停在目录，要读哪一章由用户选。
+                            // 上面那行 ResumeRow 是同一个动作。
                             //
                             // 一次都没写过的书仍然送去写作 —— 空书进目录是一片
                             // 全「未生成正文」的死胡同，而开始写是所有书的必经一步。
@@ -956,13 +1187,6 @@ fun LibraryScreen(
                         )
                     }
                 }
-                // 旧「全部项目」页的入口也搬过来：书架现在是唯一的作品列表，
-                // 没有这一本就得空着两个标签页翻
-                PaperButton(
-                    "新建小说",
-                    onOpenCreate,
-                    modifier = Modifier.fillMaxWidth()
-                )
             }
         }
     }

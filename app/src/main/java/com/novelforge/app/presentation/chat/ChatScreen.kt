@@ -204,6 +204,21 @@ class ChatViewModel(
     private val _projectScope = MutableStateFlow<String?>(null)
     private var scopeJob: kotlinx.coroutines.Job? = null
 
+    /**
+     * 现在这组对话是不是从某本书里打开的。
+     *
+     * 顶栏的返回是**按来源决定要不要给**的：
+     * - 从底栏「灵感」进的 → 不给。底栏三个 tab 就在下面，其中「书架」一键
+     *   就到，没有任何需要返回的地方。
+     * - 从书内大纲页「更多 → 灵感助手」进的 → **要给，而且必须有**。底栏三个
+     *   tab 里没有一个是「这本书」：书架是整个书架，灵感是全局桶。想去回那本书
+     *   只有这一条路（而这条路上返回去哪儿，见 `onOpenChat` 那段注释）。
+     *
+     * 之前一律显示，于是从 tab 进来时那个返回是纯冗余 —— 和书架页那个一样，
+     * 属于「同一个 tab 能到的页面不该再给一个返回」。
+     */
+    fun isBookScoped(): Boolean = !_projectScope.value.isNullOrBlank()
+
     /** 生成中点"停止"：掐掉流式请求，已收到的部分保留 */
     fun stop() {
         streamJob?.cancel()
@@ -1107,7 +1122,10 @@ fun ChatScreen(
         PaperTopBar(
             title = "灵感助手",
             subtitle = "设定、段落与情节走向",
-            onBack = onBack,
+            // 只在从书里打开时给返回。底栏进的话，三个 tab 就在下面，
+            // 「书架」一键就到，返回是纯冗余；书里进的话，那是回这本书的唯一路。
+            // 判据见 ChatViewModel.isBookScoped。
+            onBack = if (viewModel.isBookScoped()) onBack else null,
             trailing = {
                 // 思考开关放在顶栏而不是设置页：它是「这段对话要不要我动脑子」，
                 // 属于使用姿势而不是全局偏好。设置页那个「关闭思考模式」管的是

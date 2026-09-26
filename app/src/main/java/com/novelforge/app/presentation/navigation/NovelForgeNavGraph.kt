@@ -283,8 +283,7 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                     onTestConnection = { application.generationRuntime.testConnection() },
                     onFetchModels = { runCatching { application.generationRuntime.fetchModels() } },
                     onOpenLedger = { navController.navigate(Routes.LEDGER) },
-                    onOpenExports = { navController.navigate(Routes.EXPORTS) },
-                    onBack = { navController.popBackStack() }
+                    onOpenExports = { navController.navigate(Routes.EXPORTS) }
                 )
             }
 
@@ -416,13 +415,20 @@ fun NovelForgeApp(application: NovelForgeApplication) {
                     agentBusy = agentBusy,
                     agentError = agentError,
                     onAskAgent = agentViewModel::ask,
-                    onOpenChat = {
-                        navController.navigate(Routes.chat(projectId)) {
-                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
-                            launchSingleTop = true
-                            restoreState = true
-                        }
-                    }
+                    // 灵感助手从书里打开：**刻意不带** tab 那套多返回栈参数。
+                    //
+                    // 原来这里是照抄 `onSelectTopLevel` 的三个参数，而那一套只对
+                    // 「一级目的地之间切换」成立。带上的后果是 `popUpTo(books, saveState)`
+                    // 会把**当前这本书的大纲从栈里弹掉**（存进 backStackMap），于是：
+                    //   - 顶栏「返回」落在**书架**，不是这本书的大纲（用户预期是回书里）；
+                    //   - 之后点底栏「书架」会**把大纲恢复出来**，于是「书架」永远
+                    //     显示不出来 —— 屏幕上是大纲，底栏却亮着书架；
+                    //   - 而且只有第一轮能恢复，第二轮的状态直接被丢掉。
+                    // 三个问题都来自同一个多余的参数。
+                    //
+                    // 改成普通 push：大纲留在栈里，返回正好回这本书；
+                    // 「书架」tab 也回到它该做的事（显示书架）。
+                    onOpenChat = { navController.navigate(Routes.chat(projectId)) }
                 )
             }
 

@@ -79,8 +79,9 @@ fun SettingsScreen(
     onTestConnection: suspend () -> Result<ConnectionTestResult>,
     onFetchModels: suspend () -> Result<List<String>>,
     onOpenLedger: () -> Unit,
-    onOpenExports: () -> Unit,
-    onBack: () -> Unit
+    onOpenExports: () -> Unit
+    // 刻意**没有** onBack：设置只从底栏进，顶栏不该有返回。
+    // 形参留着的话下一个人一定会顺手传回去，再把返回加回来。
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -140,7 +141,11 @@ fun SettingsScreen(
             .padding(24.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        PaperTopBar(title = "设置", subtitle = "模型连接、壁纸与预设配置", onBack = onBack)
+        // 没有返回：设置只能从底栏「设置」进（全仓库只有 `Routes.kt:79` 那一个
+        // 入口指向它），而底栏三个 tab 就在下面。同一组 tab 能到的页面再给一个
+        // 返回，纯冗余 —— 和书架页同一个道理。
+        // 账本/备份是设置的二级页，它们自己的返回要留着（那是上一层，不是 tab）。
+        PaperTopBar(title = "设置", subtitle = "模型连接、壁纸与预设配置")
         // 账本和备份导出都不是设置项 —— 一个是用量事实，一个是数据搬运 ——
         // 所以收进设置当二级页，一级入口只留「书架 / 灵感 / 设置」三个。
         // （原文写的是"以前和首页上的『模型设置』磁贴摆在一起"，

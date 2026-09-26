@@ -156,11 +156,15 @@ fun OutlineScreen(
     val nextFreeIndex = ((outline?.chapters?.maxOfOrNull { it.orderIndex } ?: -1) + 1)
     val isRegen = outline != null &&
         nextFreeIndex >= (plannedChapterCount ?: nextFreeIndex)
-    val generateLabel = when {
-        outline == null -> "生成大纲"
-        !isRegen -> "继续生成大纲（${chapterLabel(nextFreeIndex)} 起）"
-        else -> "重新生成大纲"
-    }
+    val generateLabel = if (outline == null) "生成大纲" else "重新生成大纲"
+    // 「继续生成大纲（第 N 章 起）」这个状态整块去掉了。
+    //
+    // 计划没跑完时唯一的正经路径是「一键全自动」，手动这个按钮实际没人点，
+    // 却长期占着一整行、把下面的进度卡和操作区顶走。
+    //
+    // 只在两种情况下还留这个按钮：一份大纲都还没有（首次生成），或者已经
+    // 生成到计划章数（重新生成）。中间态不显示。
+    val showGenerateButton = outline == null || isRegen
 
     // 唯一一处返回判定：系统手势和顶栏「返回」都走它，行为不许分叉。
     // 规则见 OutlineViewModel.requestBack：先关详情 → 有未保存的先问 → 才允许离开本页。
@@ -180,7 +184,7 @@ fun OutlineScreen(
             onStartAutoRun = viewModel::startAutoRun,
             onToggleAutoRun = viewModel::setAutoRun
         )
-        if (!busy) {
+        if (!busy && showGenerateButton) {
             OutlinedButton(
                 onClick = {
                     if (isRegen && writtenChapterIds.isNotEmpty()) {
@@ -552,7 +556,7 @@ fun OutlineScreen(
                 Text(
                     "将删除本章及之后共 ${tail.size} 章的大纲，" +
                         "其中 $writtenTail 章已写好的正文也会被永久删除（不可恢复）。" +
-                        "之后点「继续生成大纲 / 一键全自动」将从这一章重新起跑。确定吗？"
+                        "之后点「一键全自动」将从这一章重新起跑。确定吗？"
                 )
             },
             confirmButton = {

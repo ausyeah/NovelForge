@@ -7,7 +7,7 @@
 本地优先的 Android 长篇写作应用。
 你带自己的模型 Key，程序负责记住设定、续上上下文、把生成任务跑完——模型只负责写字。
 
-**[下载 APK](#下载)** · **[能做什么](#能做什么)** · **[已知边界](#已知边界)**
+**[下载 APK](#下载)** · **[能做什么](#能做什么)** · **[技术栈](#技术栈与工程规模)** · **[已知边界](#已知边界)**
 
 </div>
 
@@ -199,9 +199,28 @@ Base URL 必须是 HTTPS，本机 localhost 除外（`127.0.0.1` / `::1` 允许 
 
 ---
 
-## 自己构建
+## 技术栈与工程规模
 
 Android 原生，Kotlin，Jetpack Compose，`minSdk 26`。本地数据在 Room，后台生成用 WorkManager。
+
+| 层 | 选型 |
+|---|---|
+| UI | Jetpack Compose + Material3 |
+| 架构 | MVVM（ViewModel + StateFlow + 不可变 UiState） |
+| 本地存储 | Room；后台任务 WorkManager |
+| 网络 | OkHttp + kotlinx.serialization（OpenAI-compatible HTTPS + Bearer） |
+| 密钥 | Android Keystore 保护的 AES-GCM 密文 |
+
+| 指标 | 数值 |
+|---|---|
+| Kotlin 代码 | 约 14200 行 / 104 个文件 |
+| 单元测试 | **56 个测试类**（另有 3 个 `androidTest` 仪器测试） |
+| 最大能力 | 1500 章 × 每章 500–10000 字 |
+
+测试不是凑数的——上面那张「按本章捞回 3/3」的对照表，
+以及滚动冻结、备份导出、章节导航等行为，都是 `ContinuityBenchmarkTest` 等测试**断言出来的**。
+
+## 自己构建
 
 - JDK 17
 - Android SDK Platform 35

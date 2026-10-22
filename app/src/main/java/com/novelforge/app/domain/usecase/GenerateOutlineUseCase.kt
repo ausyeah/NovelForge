@@ -128,8 +128,13 @@ class GenerateOutlineUseCase(
         val creativeConfig = checkNotNull(project.creativeConfig) { "请先完成创作设置" }
         val chapterCount = creativeConfig.chapterCount.coerceIn(MIN_CHAPTER_COUNT, MAX_CHAPTER_COUNT)
         // 分批生成：每次请求一批连续推进段，避免要求模型一次输出几百章
-        val batchStart = chapterNumber.coerceIn(1, chapterCount)
-        val batchEnd = minOf(batchStart + OUTLINE_BATCH_SIZE - 1, chapterCount)
+        val batchWindow = OutlineBatchPlanner.window(
+            chapterNumber = chapterNumber,
+            chapterCount = chapterCount,
+            batchSize = OUTLINE_BATCH_SIZE
+        )
+        val batchStart = batchWindow.first
+        val batchEnd = batchWindow.last
         val batchCount = batchEnd - batchStart + 1
         val rangeLabel = if (batchStart == batchEnd) com.novelforge.app.presentation.common.chapterLabel(batchStart - 1)
             else "${com.novelforge.app.presentation.common.chapterLabel(batchStart - 1)} 至 ${com.novelforge.app.presentation.common.chapterLabel(batchEnd - 1)}"
@@ -187,8 +192,9 @@ class GenerateOutlineUseCase(
         )
     }
 
-    private companion object {
+    companion object {
         const val PREVIOUS_CONTEXT_LIMIT = 3
-        const val OUTLINE_BATCH_SIZE = 10
+        /** 批大小：与 [OutlineBatchPlanner.BATCH_SIZE] 同源，避免两处各写一个数字 */
+        const val OUTLINE_BATCH_SIZE = OutlineBatchPlanner.BATCH_SIZE
     }
 }

@@ -35,6 +35,7 @@ import com.novelforge.app.domain.repository.PromptSnapshotRepository
 import com.novelforge.app.domain.repository.ProjectRepository
 import com.novelforge.app.domain.usecase.GenerateChapterUseCase
 import com.novelforge.app.domain.usecase.GenerateOutlineUseCase
+import com.novelforge.app.domain.usecase.OutlineBatchPlanner
 import com.novelforge.app.domain.usecase.QueuedGeneration
 import com.novelforge.app.infrastructure.llm.ChatMessage
 import com.novelforge.app.infrastructure.llm.ChatOptions
@@ -332,7 +333,6 @@ class GenerationRuntime(
             outputTokenBudget = settings.outputBudget,
             clientRequestId = clientRequestId
         )
-        savePromptSnapshot(queued)
         var enqueuedJob = resetOutlineJobForRetry(queued.job, now())
         // 继续生成：以最新大纲版本为准重置任务内容。复用的旧任务里可能残留
         // 失败批次的残缺输出（解析为 0 章就会从引子重开），必须覆盖掉
@@ -344,6 +344,10 @@ class GenerationRuntime(
                 )
             }
         }
+        // 快照必须在「续跑进度回填之后」重建：GenerateOutlineUseCase.invoke() 不掌握
+        // 进度，它造的 request 恒为「从第 1 章开始」，直接存会让账本里的提示词与
+        // 真正发出的请求不一致（追溯时永远看到第一批）。
+        savePromptSnapshot(outlineRequestSnapshot(QueuedGeneration(enqueuedJob, queued.request), settings))
         // 必须把重置后的状态写回数据库；否则 Worker 读到的仍是 NEEDS_USER，
         // execute() 会直接跳过执行，用户点击“修复并重试”就毫无反应。
         generationRepository.updateJob(enqueuedJob)
@@ -356,6 +360,34 @@ class GenerationRuntime(
                 enqueuedJob.status == GenerationJobStatus.PAUSED
         )
         return enqueuedJob
+    }
+
+    /**
+     * 用「真实续跑进度」重建大纲请求，只用于落提示词快照。
+     *
+     * GenerateOutlineUseCase.invoke() 拿不到进度（它只看有没有活跃任务），
+     * 造出来的 request 恒为第一批；真正执行时 prepareOutlineExecution 会按
+     * [readOutlineProgress] 重建请求。这里补上同一套算法，保证快照与实际一致。
+     */
+    private suspend fun outlineRequestSnapshot(
+        queued: QueuedGeneration,
+        settings: AppSettings
+    ): QueuedGeneration {
+        val project = projectRepository.getProject(queued.job.projectId) ?: return queued
+        val creativeConfig = project.creativeConfig ?: return queued
+        val totalChapterCount = creativeConfig.chapterCount.coerceIn(MIN_CHAPTER_COUNT, MAX_CHAPTER_COUNT)
+        val progress = readOutlineProgress(queued.job.partialContent, totalChapterCount)
+        val requestId = "${queued.job.clientRequestId}-outline-chapter-${progress.currentChapterNumber}"
+        return queued.copy(
+            request = generateOutline.buildChapterRequest(
+                project = project,
+                connection = connection(settings),
+                outputTokenBudget = settings.outputBudget,
+                requestId = requestId,
+                chapterNumber = progress.currentChapterNumber,
+                previousChapters = progress.chapters.takeLast(PREVIOUS_CONTEXT_LIMIT)
+            )
+        )
     }
 
     suspend fun queueChapter(
@@ -1011,7 +1043,16 @@ class GenerationRuntime(
                 // 删章留洞也不会让新 id 与既有 "chapter-N" 撞号
                 val start = progress.currentChapterNumber
                 val remaining = (progress.totalChapterCount - progress.nextOrderIndex).coerceAtLeast(0)
-                val newItems = parsed.value.take(remaining).mapIndexed { index, item ->
+                // 批大小护栏：模型一次吐回整本书时，仍然只收本批（默认 10 章），
+                // 多出来的章节留给后续批次——先把这批正文写完再继续下一批。
+                // 去掉这道护栏，超长篇就会退化成「一次性把全书大纲写完」，
+                // 后面的章节既没有正文锚点、也没有上下文空间，质量会直线塌陷。
+                val accepted = OutlineBatchPlanner.acceptedCount(
+                    returned = parsed.value.size,
+                    remainingInBook = remaining,
+                    batchSize = GenerateOutlineUseCase.OUTLINE_BATCH_SIZE
+                )
+                val newItems = parsed.value.take(accepted).mapIndexed { index, item ->
                     item.copy(
                         id = "chapter-${start + index}",
                         orderIndex = start - 1 + index
@@ -1041,7 +1082,12 @@ class GenerationRuntime(
                     errorMessage = null,
                     updatedAt = now()
                 )
-                if (progress.nextOrderIndex + newItems.size < progress.totalChapterCount) {
+                if (OutlineBatchPlanner.shouldPause(
+                        nextOrderIndex = progress.nextOrderIndex,
+                        accepted = newItems.size,
+                        totalChapterCount = progress.totalChapterCount
+                    )
+                ) {
                     // 轮次机制：每批（10 章）完成后暂停，等本批正文写完再继续下一批；
                     // 先把当前累积大纲落为版本，供用户查看/编辑
                     val result = persistOutline(

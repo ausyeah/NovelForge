@@ -223,7 +223,12 @@ interface PromptSnapshotDao {
     @Query("SELECT * FROM prompt_snapshots WHERE id = :id LIMIT 1")
     suspend fun findById(id: String): PromptSnapshotEntity?
 
-    @Insert(onConflict = OnConflictStrategy.ABORT)
+    // REPLACE 而不是默认的 ABORT：任务复用（重试/续跑）时 job.promptSnapshotId 不变，
+    // 而 worker 执行时会把这个 id 刷新成新 UUID 并落库 —— 再入队一次就是同一 id
+    // 二次插入，ABORT 直接抛 SQLiteConstraintException，把「模型输出一堆然后
+    // 啥都没了」的生成流程整个撞死（用户实测复现）。语义上快照=「该任务最近一次
+    // 发出的请求」，后来者覆盖前来者正是所需。
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(snapshot: PromptSnapshotEntity)
 
     @Query(

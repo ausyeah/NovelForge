@@ -1251,19 +1251,27 @@ class GenerationRuntime(
 
     private suspend fun savePromptSnapshot(job: GenerationJob, request: ChatRequest) {
         val messagesJson = json.encodeToString(request.messages)
-        promptSnapshotRepository.save(
-            PromptSnapshot(
-                id = job.promptSnapshotId,
-                systemPrompt = request.messages
-                    .firstOrNull { it.role == ChatRole.SYSTEM }
-                    ?.content
-                    .orEmpty(),
-                messagesJson = messagesJson,
-                model = request.config.model,
-                temperature = request.options.temperature,
-                createdAt = now()
+        // 快照是账本旁路，不是生成的必需品：任何写库失败（约束冲突/磁盘满/库被删）
+        // 都只许记日志，绝不许冒出去把主流程搞崩。「模型输出一堆然后啥都没了」
+        // 的死因就是它：prompt_snapshots.id 二次插入抛异常，一路冒到
+        // OutlineViewModel 的 runCatching，用户只看到一句 UNIQUE constraint failed。
+        runCatching {
+            promptSnapshotRepository.save(
+                PromptSnapshot(
+                    id = job.promptSnapshotId,
+                    systemPrompt = request.messages
+                        .firstOrNull { it.role == ChatRole.SYSTEM }
+                        ?.content
+                        .orEmpty(),
+                    messagesJson = messagesJson,
+                    model = request.config.model,
+                    temperature = request.options.temperature,
+                    createdAt = now()
+                )
             )
-        )
+        }.onFailure { e ->
+            diag("savePromptSnapshot 失败(已吞掉,不影响生成): job=${job.id} snapshot=${job.promptSnapshotId} err=${e.message}")
+        }
     }
 
     private suspend fun restoreRequest(

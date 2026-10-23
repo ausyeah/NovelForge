@@ -751,7 +751,13 @@ class GenerationRuntime(
 
             var completed: GenerationEvent.Completed? = null
             var superseded = false
-            coordinator.execute(prepared.job.id, prepared.request).collect { event ->
+            coordinator.execute(
+                prepared.job.id,
+                prepared.request,
+                // 大纲批次：length 截断时也要把已收到的内容上抛，finishOutlineExecution
+                // 会从残缺 JSON 里抢救已完整的章节；半截正文没有抢救价值，不上抛。
+                emitPartialAsCompleted = prepared.job.purpose == GenerationPurpose.OUTLINE
+            ).collect { event ->
                 when (event) {
                     is GenerationEvent.Completed -> completed = event
                     is GenerationEvent.Superseded -> superseded = true
@@ -1014,7 +1020,15 @@ class GenerationRuntime(
         call: LlmCall
     ): GenerationExecutionResult {
         val progress = requireNotNull(prepared.outlineProgress)
-        if (finalJob.status != GenerationJobStatus.COMPLETED || completed == null) {
+        // COMPLETED：正常走完。RECOVERABLE_PARTIAL + completed != null：length 截断，
+        // Coordinator 按 emitPartialAsCompleted 把已收到的内容上抛过来等着抢救
+        // （partialContent 里往往已有若干完整章节）。其余状态（取消/失败/空流）
+        // 没有内容可落，只记账不解析。
+        val hasSalvageableContent = completed != null && (
+            finalJob.status == GenerationJobStatus.COMPLETED ||
+                finalJob.status == GenerationJobStatus.RECOVERABLE_PARTIAL
+            )
+        if (!hasSalvageableContent) {
             generationArtifactRepository.saveJobAndLlmCall(finalJob, call)
             return GenerationExecutionResult.Success
         }
@@ -1023,14 +1037,26 @@ class GenerationRuntime(
             is com.novelforge.app.infrastructure.llm.JsonValidationResult.Failure -> {
                 // 保存给用户手动修复的原始输出剔除思考内容，避免修复框里全是思考文字
                 val preserved = checkpointContent(progress.canonicalContent, stripInlineReasoning(completed.content))
+                // 截断是暂时的（输出额度不够），不是结构坏掉：保留 RECOVERABLE_PARTIAL
+                // 让「继续生成大纲」原地重试，不升级成 NEEDS_USER 逼用户手修 JSON
+                val truncated = completed.finishReason == "length"
                 generationArtifactRepository.saveJobAndLlmCall(
                     finalJob.copy(
-                        status = GenerationJobStatus.NEEDS_USER,
+                        status = if (truncated) {
+                            GenerationJobStatus.RECOVERABLE_PARTIAL
+                        } else {
+                            GenerationJobStatus.NEEDS_USER
+                        },
                         partialContent = preserved,
-                        errorType = "INVALID_JSON",
-                        // 用「」而不是弯引号“”：全 App 的用户可见文案里，
-                        // 引用界面上的按钮名一律用「」，只有这两行是例外。
-                        errorMessage = "${com.novelforge.app.presentation.common.chapterLabel(progress.currentChapterNumber - 1)} 大纲未通过结构校验：${parsed.reason}。请点击「修复」手动修改，或点击「重试」重新生成",
+                        errorType = if (truncated) "OUTPUT_TRUNCATED" else "INVALID_JSON",
+                        errorMessage = if (truncated) {
+                            "模型输出触达长度上限被截断，本批没有抢救到完整章节。请点「继续生成大纲」重试；" +
+                                "若反复截断，请在「设置 → 连接」调高输出长度上限或关闭思考模式"
+                        } else {
+                            // 用「」而不是弯引号“”：全 App 的用户可见文案里，
+                            // 引用界面上的按钮名一律用「」，只有这两行是例外。
+                            "${com.novelforge.app.presentation.common.chapterLabel(progress.currentChapterNumber - 1)} 大纲未通过结构校验：${parsed.reason}。请点击「修复」手动修改，或点击「重试」重新生成"
+                        },
                         updatedAt = now()
                     ),
                     call

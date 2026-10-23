@@ -1,0 +1,343 @@
+package com.novelforge.app.infrastructure.llm
+
+import com.novelforge.app.domain.model.OutlineItem
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonPrimitive
+
+@Serializable
+data class ChapterEnvelope(
+    val summary: String,
+    val content: String
+)
+
+@Serializable
+data class OutlineEnvelope(
+    val chapters: List<OutlineItem>
+)
+
+sealed interface JsonValidationResult<out T> {
+    data class Success<T>(val value: T, val normalizedJson: String) : JsonValidationResult<T>
+    data class Failure(val reason: String) : JsonValidationResult<Nothing>
+}
+
+class JsonResponseValidator(
+    private val json: Json = Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+        explicitNulls = false
+    }
+) {
+    fun parseChapter(raw: String): JsonValidationResult<ChapterEnvelope> =
+        decodeObject(stripInlineReasoning(raw)) { element ->
+            val value = json.decodeFromJsonElement<ChapterEnvelope>(element)
+            if (value.summary.isBlank()) return@decodeObject "summary 不能为空"
+            if (value.content.isBlank()) return@decodeObject "content 不能为空"
+            value
+        }
+
+    fun parseOutline(raw: String, expectedCount: Int? = null): JsonValidationResult<List<OutlineItem>> {
+        return try {
+            val cleaned = stripInlineReasoning(raw)
+            val normalized = extractJsonValue(cleaned)
+            if (normalized == null) {
+                // 不对上游文字做过多规范：纯文本直接作为单章概要保留；
+                // 但以 { 或 [ 开头却解析失败的，是残缺的 JSON 碎片，
+                // 不能把碎片当概要存进大纲，留给手动修复或重试。
+                val plainText = cleaned.trim()
+                if (plainText.isEmpty()) {
+                    return JsonValidationResult.Failure("未找到 JSON 数组或对象")
+                }
+                if (plainText.startsWith("{") || plainText.startsWith("[")) {
+                    // 残缺 JSON 碎片：先抢救已经完整闭合的章节，一条都救不回来才报错
+                    return salvageOutline(raw)
+                        ?: JsonValidationResult.Failure("未找到完整的 JSON 数组或对象")
+                }
+                val item = OutlineItem(
+                    id = "outline-item-1",
+                    orderIndex = 0,
+                    title = "第 1 章",
+                    summary = plainText
+                )
+                return JsonValidationResult.Success(listOf(item), plainText)
+            }
+            val element = json.parseToJsonElement(normalized)
+            val array = when (element) {
+                is JsonArray -> element
+                is JsonObject -> sequenceOf("chapters", "outline", "items")
+                    .mapNotNull { key -> element[key] as? JsonArray }
+                    .firstOrNull()
+                    ?: element.takeIf(::looksLikeOutlineItem)?.let(::listOf)
+                else -> null
+            } ?: return salvageOutline(raw)
+                ?: JsonValidationResult.Failure("大纲 JSON 必须是数组或包含 chapters 数组的对象")
+            // 逐项解析，坏项跳过而不是整单拒绝：一条缺概要的章节不该把
+            // 同批另外 9 章全部拖死（超长篇小说一批批滚，卡一批等于卡全书）
+            val items = array.mapIndexedNotNull { index, item -> parseOutlineItemOrNull(item, index) }
+            if (items.isEmpty()) {
+                // 数组在但一条都没解析出来（[] 或整批坏项）：
+                // 再给原文一次抢救机会，仍然救不回来才按「空」报错
+                return salvageOutline(raw)
+                    ?: JsonValidationResult.Failure("大纲不能为空")
+            }
+            // 上游多给了就只取前 N 个，不再整单拒绝
+            val trimmed = if (expectedCount != null && items.size > expectedCount) {
+                items.take(expectedCount)
+            } else {
+                items
+            }
+            // 保留模型/检查点自带的 orderIndex（删章留洞是设计）；仅在缺失或撞号时按位置兜底
+            JsonValidationResult.Success(preserveOutlineIndexes(normalizeOutlineIds(trimmed)), normalized)
+        } catch (error: Exception) {
+            JsonValidationResult.Failure("大纲 JSON 无法解析：${error.message.orEmpty()}")
+        }
+    }
+
+    private fun parseOutlineItem(element: JsonElement, index: Int): OutlineItem {
+        val objectValue = element as? JsonObject
+            ?: error("第 ${index + 1} 个大纲项必须是对象")
+
+        fun firstText(vararg keys: String): String? = keys.asSequence()
+            .mapNotNull { key -> objectValue[key] }
+            .mapNotNull(::textValue)
+            .map(String::trim)
+            .firstOrNull { it.isNotEmpty() }
+
+        val id = firstText("id", "chapterId", "chapter_id").orEmpty()
+        val orderIndex = objectValue["orderIndex"]?.let(::intValue)
+            ?: objectValue["order"]?.let(::intValue)
+            ?: index
+        val title = firstText("title", "chapterTitle", "name", "chapterName", "heading")
+            .orEmpty()
+            .ifBlank { "第 ${index + 1} 章" }
+        val summary = firstText(
+            "summary",
+            "description",
+            "synopsis",
+            "storyline",
+            "plot",
+            "content",
+            "outline",
+            "text"
+        ).orEmpty().ifBlank { error("第 ${index + 1} 个大纲项缺少概要") }
+        val characterChanges = objectValue["characterChanges"]?.let(::textValue)
+
+        return OutlineItem(
+            id = id,
+            orderIndex = orderIndex,
+            title = title,
+            summary = summary,
+            characterChanges = characterChanges
+        )
+    }
+
+    private fun parseOutlineItemOrNull(element: JsonElement, index: Int): OutlineItem? =
+        try {
+            parseOutlineItem(element, index)
+        } catch (_: Exception) {
+            null
+        }
+
+    private fun looksLikeOutlineItem(value: JsonObject): Boolean =
+        value.keys.any { it in setOf("title", "chapterTitle", "name", "chapterName", "heading") } ||
+            value.keys.any {
+                it in setOf(
+                    "summary", "description", "synopsis", "storyline",
+                    "plot", "content", "outline", "text"
+                )
+            }
+
+    private fun textValue(value: JsonElement): String? = when (value) {
+        JsonNull -> null
+        is JsonPrimitive -> value.contentOrNull
+        is JsonArray -> value.mapNotNull(::textValue)
+            .map(String::trim)
+            .filter(String::isNotEmpty)
+            .joinToString("；")
+            .takeIf { it.isNotEmpty() }
+        else -> value.toString()
+    }
+
+    private fun intValue(value: JsonElement): Int? =
+        value.jsonPrimitive.intOrNull ?: value.jsonPrimitive.contentOrNull?.toIntOrNull()
+
+    /**
+     * 输出被 max_tokens 截断时，整单 JSON 必然残缺（extractJsonValue 找不到闭合括号），
+     * 但截断点之前往往已经有若干完整闭合的章节对象。这里把它们逐个捞出来，
+     * 凑几条算几条，交给上层按批入库继续推进，而不是让整本书卡在
+     * 「未通过结构校验」上。一条都捞不到时返回 null，由调用方决定报错文案。
+     */
+    private fun salvageOutline(raw: String): JsonValidationResult<List<OutlineItem>>? {
+        val cleaned = stripInlineReasoning(raw)
+        val arrayStart = findOutlineArrayStart(cleaned) ?: return null
+        val salvaged = mutableListOf<OutlineItem>()
+        var cursor = arrayStart
+        while (cursor < cleaned.length) {
+            val open = cleaned.indexOf('{', cursor)
+            if (open < 0) break
+            // 没找到配对 } 就是截断点：最后一个章节对象只写了一半，后面也没有了
+            val close = matchBrace(cleaned, open) ?: break
+            val element = try {
+                json.parseToJsonElement(cleaned.substring(open, close + 1))
+            } catch (_: Exception) {
+                cursor = close + 1
+                continue
+            }
+            if (element is JsonObject) {
+                parseOutlineItemOrNull(element, salvaged.size)?.let(salvaged::add)
+            }
+            cursor = close + 1
+        }
+        if (salvaged.isEmpty()) return null
+        return JsonValidationResult.Success(
+            preserveOutlineIndexes(normalizeOutlineIds(salvaged)),
+            cleaned.trim()
+        )
+    }
+
+    /** 定位 chapters 数组起点：优先认 chapters/outline/items 键，退化到第一个 [ */
+    private fun findOutlineArrayStart(text: String): Int? {
+        for (key in listOf("\"chapters\"", "\"outline\"", "\"items\"")) {
+            val keyIndex = text.indexOf(key)
+            if (keyIndex >= 0) {
+                val bracket = text.indexOf('[', keyIndex + key.length)
+                if (bracket >= 0) return bracket
+            }
+        }
+        return text.indexOf('[')
+    }
+
+    /** 从 openIndex 处的 { 起找配对的 }，尊重字符串与转义；截断（没闭合）时返回 null */
+    private fun matchBrace(text: String, openIndex: Int): Int? {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (index in openIndex until text.length) {
+            val character = text[index]
+            if (inString) {
+                if (escaped) escaped = false
+                else if (character == '\\') escaped = true
+                else if (character == '"') inString = false
+                continue
+            }
+            when (character) {
+                '"' -> inString = true
+                '{' -> depth++
+                '}' -> {
+                    depth--
+                    if (depth == 0) return index
+                }
+            }
+        }
+        return null
+    }
+
+    private fun normalizeOutlineIds(items: List<OutlineItem>): List<OutlineItem> {
+        val usedIds = mutableSetOf<String>()
+        return items.mapIndexed { index, item ->
+            var candidateId = item.id.ifBlank { "outline-item-${index + 1}" }
+            if (!usedIds.add(candidateId)) {
+                candidateId = "outline-item-${index + 1}"
+                var suffix = 2
+                while (!usedIds.add(candidateId)) {
+                    candidateId = "outline-item-${index + 1}-$suffix"
+                    suffix++
+                }
+            }
+            item.copy(id = candidateId)
+        }
+    }
+
+    private inline fun <reified T> decodeObject(
+        raw: String,
+        validate: (JsonElement) -> Any
+    ): JsonValidationResult<T> {
+        return try {
+            val normalized = extractJsonValue(raw) ?: return JsonValidationResult.Failure("未找到 JSON 对象")
+            val element = json.parseToJsonElement(normalized)
+            if (element !is JsonObject) return JsonValidationResult.Failure("响应必须是 JSON 对象")
+            val validationResult = validate(element)
+            if (validationResult is String) return JsonValidationResult.Failure(validationResult)
+            @Suppress("UNCHECKED_CAST")
+            JsonValidationResult.Success(validationResult as T, normalized)
+        } catch (error: Exception) {
+            JsonValidationResult.Failure("JSON 无法解析：${error.message.orEmpty()}")
+        }
+    }
+
+    companion object {
+        fun extractJsonValue(raw: String): String? {
+            val start = raw.indexOfFirst { it == '{' || it == '[' }
+            if (start < 0) return null
+            val opening = raw[start]
+            val closing = if (opening == '{') '}' else ']'
+            var depth = 0
+            var inString = false
+            var escaped = false
+            for (index in start until raw.length) {
+                val character = raw[index]
+                if (inString) {
+                    if (escaped) escaped = false
+                    else if (character == '\\') escaped = true
+                    else if (character == '"') inString = false
+                    continue
+                }
+                when (character) {
+                    '"' -> inString = true
+                    opening -> depth++
+                    closing -> {
+                        depth--
+                        if (depth == 0) return raw.substring(start, index + 1)
+                    }
+                }
+            }
+            return null
+        }
+    }
+}
+
+/**
+ * 去掉模型输出中内联的思考片段，只保留正文：
+ * - `<think>…</think>` 成对出现时整段剔除；
+ * - 只有 `<think>` 没有闭合（输出额度被思考耗尽）时，丢弃到结尾的全部内容。
+ */
+fun stripInlineReasoning(raw: String): String {
+    if (!raw.contains("<think>")) return raw
+    val builder = StringBuilder()
+    var cursor = 0
+    while (true) {
+        val start = raw.indexOf("<think>", cursor)
+        if (start < 0) {
+            builder.append(raw, cursor, raw.length)
+            break
+        }
+        builder.append(raw, cursor, start)
+        val end = raw.indexOf("</think>", start + "<think>".length)
+        if (end < 0) break
+        cursor = end + "</think>".length
+    }
+    return builder.toString().trim()
+}
+
+/**
+ * 删章留洞的序号可以大于列表长度，只要互不重复就保留。
+ * 旧逻辑把「大于等于章节数」的序号当成非法再压成 0..N-1，续写时会和 chapter-N 撞号。
+ */
+fun preserveOutlineIndexes(items: List<com.novelforge.app.domain.model.OutlineItem>): List<com.novelforge.app.domain.model.OutlineItem> {
+    val preserved = items.mapIndexed { index, item ->
+        if (item.orderIndex >= 0) item else item.copy(orderIndex = index)
+    }
+    return if (preserved.map { it.orderIndex }.distinct().size == preserved.size) {
+        preserved.sortedBy { it.orderIndex }
+    } else {
+        items.mapIndexed { index, item -> item.copy(orderIndex = index) }
+    }
+}

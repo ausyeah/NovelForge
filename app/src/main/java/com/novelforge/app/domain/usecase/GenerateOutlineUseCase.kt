@@ -139,6 +139,10 @@ class GenerateOutlineUseCase(
         val rangeLabel = if (batchStart == batchEnd) com.novelforge.app.presentation.common.chapterLabel(batchStart - 1)
             else "${com.novelforge.app.presentation.common.chapterLabel(batchStart - 1)} 至 ${com.novelforge.app.presentation.common.chapterLabel(batchEnd - 1)}"
         val genreTags = creativeConfig.genreTags.joinToString("、").ifBlank { "未指定" }
+        // 输出长度锚点：默认 5000 token 的输出预算下，一批 10 章 × 无上限 summary
+        // 必然触顶被截断（截断的 JSON 整单作废，全书卡死）。按目标正文长度折算
+        // 概要字数（每 20 字正文配 1 字概要），夹在 120–240 字之间。
+        val summaryCharLimit = (creativeConfig.targetLength / 20).coerceIn(120, 240)
         val previousContext = previousChapters
             .takeLast(PREVIOUS_CONTEXT_LIMIT)
             .joinToString("\n") { item ->
@@ -155,7 +159,8 @@ class GenerateOutlineUseCase(
             messages = listOf(
                 ChatMessage(
                     ChatRole.SYSTEM,
-                    "你是长篇小说故事线编辑。本次任务只整理全书故事线中一批连续章节的推进段，不写正文，不要求细节描写。必须只返回合法 JSON，不要 Markdown、代码围栏、解释或额外文字。"
+                    "你是长篇小说故事线编辑。本次任务只整理全书故事线中一批连续章节的推进段，不写正文，不要求细节描写。必须只返回合法 JSON，不要 Markdown、代码围栏、解释或额外文字。" +
+                        "严格控制输出长度：每个 summary 不超过 $summaryCharLimit 字；当本批内容接近输出上限时，必须优先保证 JSON 完整闭合——可以少返回几个推进段（漏掉的由后续批次补齐），严禁输出被长度限制截断的半截 JSON。"
                 ),
                 ChatMessage(
                     ChatRole.USER,
@@ -173,9 +178,9 @@ class GenerateOutlineUseCase(
                     【最近前文，仅用于衔接】
                     $previousContext
                     如果资料不完整，请自行补全合理内容，不能回复“无法生成”。
-                    只允许返回如下 JSON 结构，chapters 数组必须恰好包含 $batchCount 项且顺序与章节号一致：
+                    只允许返回如下 JSON 结构，chapters 数组按章节顺序排列：
                     {"chapters":[{"title":"本章标题","summary":"说明这一章故事如何发展、冲突如何推进，以及为下一章留下什么方向"}]}
-                    summary 不限定字数，以清楚、完整、简洁为准。不要提供 id、orderIndex 或 characterChanges；应用会统一补全和存储。
+                    每个 summary 控制在 $summaryCharLimit 字以内：写清故事发展、冲突变化与衔接方向即可，不展开细节描写。若整批内容接近输出上限，宁可少返回几个推进段（顺序不能乱，漏掉的由后续批次补齐），也必须保证 JSON 完整闭合，严禁半截 JSON。不要提供 id、orderIndex 或 characterChanges；应用会统一补全和存储。
                     """.trimIndent()
                 )
             ),

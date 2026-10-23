@@ -1,0 +1,1999 @@
+package com.novelforge.app.presentation.chat
+
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.wrapContentSize
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.LocalTextSelectionColors
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.text.selection.TextSelectionColors
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.novelforge.app.data.chat.ChatHistoryStore
+import com.novelforge.app.data.chat.StoredAttachment
+import com.novelforge.app.data.chat.StoredChatMessage
+import com.novelforge.app.data.chat.StoredConversation
+import com.novelforge.app.presentation.chat.richtext.ChatRichText
+import com.novelforge.app.data.security.ApiKeyStore
+import com.novelforge.app.data.settings.AppSettingsStore
+import com.novelforge.app.infrastructure.llm.ChatMessage
+import com.novelforge.app.infrastructure.llm.ChatOptions
+import com.novelforge.app.infrastructure.llm.ChatRequest
+import com.novelforge.app.infrastructure.llm.ChatRole
+import com.novelforge.app.infrastructure.llm.LLMConnectionConfig
+import com.novelforge.app.infrastructure.llm.OpenAiCompatibleClient
+import com.novelforge.app.infrastructure.llm.ProviderCapabilities
+import com.novelforge.app.infrastructure.llm.StreamEvent
+import com.novelforge.app.presentation.common.PaperTopBar
+import com.novelforge.app.ui.theme.PaperButton
+import com.novelforge.app.ui.theme.PaperShape
+import com.novelforge.app.ui.theme.PaperSurface
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.math.abs
+
+data class UiChatMessage(
+    val role: ChatRole,
+    val text: String,
+    val reasoning: String = "",
+    val streaming: Boolean = false,
+    /**
+     * 稳定 id。LazyColumn 的 key、思考折叠的 remember key 都依赖它：
+     * 按位置复用槽位时，流式刷新会把整棵子树重建，折叠状态也会串到别的气泡上。
+     * 放在最后且带默认值，老的构造调用（不传 id）一处都不用改。
+     */
+    val id: String = newMessageId(),
+    /**
+     * 这条消息带的附件。存的是路径不是字节 —— 见 ChatAttachmentStore 的注释。
+     * 气泡上要显示缩略图、请求时要重新读文件，两处都只拿得到路径。
+     */
+    val attachments: List<StoredAttachment> = emptyList(),
+    /**
+     * 这条回复是**中途断掉**的（进程被杀 / 崩溃），不是模型正常说完的。
+     *
+     * 定期存档（checkpointIfDue）会把流到一半的内容落盘，所以从历史里
+     * 读回来时，最后一条可能是半句。界面必须说清楚，否则用户会以为
+     * 模型就只答了这么多，白等一场。
+     */
+    val interrupted: Boolean = false
+)
+
+/** 消息 id：每个新气泡一个，copy() 会原样带过去。 */
+private fun newMessageId(): String = "m-${System.nanoTime()}-${(1000..9999).random()}"
+
+private const val INSPIRATION_SYSTEM_PROMPT =
+    "你是「小说灵感启发助手」，一位陪伴网文作者的创作顾问。\n" +
+        "- 帮作者头脑风暴剧情、人物、世界观与开篇钩子，给点子时一次给出 2-4 个方向不同的方案，突出新颖性和可延展性，避免俗套。\n" +
+        "- 每个方案用一句话点明核心爽点/亮点，以及可能踩的坑。\n" +
+        "- 作者犹豫或卡壳时，用一两个尖锐但友好的提问引导他往下想，不空谈创作理论。\n" +
+        "- 回答简洁实用、可直接落地。必须用中文。"
+
+class ChatViewModel(
+    private val settingsStore: AppSettingsStore,
+    private val apiKeyStore: ApiKeyStore,
+    private val client: OpenAiCompatibleClient,
+    private val historyStore: ChatHistoryStore,
+    private val llmCallRepository: com.novelforge.app.domain.repository.LlmCallRepository,
+    private val attachmentStore: com.novelforge.app.data.chat.ChatAttachmentStore,
+    /**
+     * 应用级 scope，只用在 onCleared 兜底存档上。
+     *
+     * 那一刻 viewModelScope 已经取消，存档必须换个活得久的 scope 才写得完。
+     * 默认值方便纯 JVM 单测构造（单测里不触发 onCleared 兜底）。
+     */
+    private val applicationScope: CoroutineScope = CoroutineScope(Dispatchers.IO)
+) : ViewModel() {
+    private val _messages = MutableStateFlow<List<UiChatMessage>>(emptyList())
+    val messages: StateFlow<List<UiChatMessage>> = _messages.asStateFlow()
+
+    private val _busy = MutableStateFlow(false)
+    val busy: StateFlow<Boolean> = _busy.asStateFlow()
+
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
+    private val _conversations = MutableStateFlow<List<StoredConversation>>(emptyList())
+    val conversations: StateFlow<List<StoredConversation>> = _conversations.asStateFlow()
+
+    private val _activeId = MutableStateFlow("")
+    val activeId: StateFlow<String> = _activeId.asStateFlow()
+
+    // 冻结策略：视口不在绝对底部（reverseLayout 的 (0,0)）、列表在滚、或手指
+    // 按着时，增量照常攒进 builder，但**一个字都不发**。
+    //
+    // 以前这里只写不读 —— publishStream 只看节流窗口，压根没查 frozen，
+    // 于是"翻上去别动"是句空话：列表在 20Hz 长高，reverseLayout 下最后一条
+    // 变高会把上面所有内容顶走，用户看到的就是"自己没动，页面自己在抽"。
+    private var frozen = false
+
+    /**
+     * 增量只往 builder 里追加，不再每来一个 SSE token 就
+     * `m.text + event.text` 复制一遍不断变长的整段正文（那是 O(n²)）。
+     * 发布节流由 publishStream 按正文长度自适应控制。
+     */
+    private val streamReasoning = StringBuilder()
+    private val streamText = StringBuilder()
+    private var lastPublishAt = 0L
+    private var lastCheckpointAt = 0L
+    private var streamJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * 会话作用域（书 id），null/空 = 全局「灵感」桶。
+     * 默认 null 是有意的：导航图当前还是无参的 "chat" 路由，进不来 projectId，
+     * 此刻的行为与老版本完全一致。路由补上参数后调用 bindProjectScope 即可。
+     */
+    private val _projectScope = MutableStateFlow<String?>(null)
+    private var scopeJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * 现在这组对话是不是从某本书里打开的。
+     *
+     * 顶栏的返回是**按来源决定要不要给**的：
+     * - 从底栏「灵感」进的 → 不给。底栏三个 tab 就在下面，其中「书架」一键
+     *   就到，没有任何需要返回的地方。
+     * - 从书内大纲页「更多 → 灵感助手」进的 → **要给，而且必须有**。底栏三个
+     *   tab 里没有一个是「这本书」：书架是整个书架，灵感是全局桶。想去回那本书
+     *   只有这一条路（而这条路上返回去哪儿，见 `onOpenChat` 那段注释）。
+     *
+     * 之前一律显示，于是从 tab 进来时那个返回是纯冗余 —— 和书架页那个一样，
+     * 属于「同一个 tab 能到的页面不该再给一个返回」。
+     */
+    fun isBookScoped(): Boolean = !_projectScope.value.isNullOrBlank()
+
+    /** 生成中点"停止"：掐掉流式请求，已收到的部分保留 */
+    fun stop() {
+        streamJob?.cancel()
+    }
+
+    fun setFrozen(value: Boolean) {
+        if (frozen == value) return
+        frozen = value
+        if (!frozen) flushPending()
+    }
+
+    /**
+     * 用户刚点了发送 —— **强制解冻并回到跟随状态**。
+     *
+     * 原来只有 `setFrozen(!atBottom || …)` 那一条路，而它由界面的 `atBottom` 驱动。
+     * 于是「你翻上去看历史 → 打了一句话发出去」这个最常见的组合会这样：
+     *   - 发送时 `atBottom` 仍是 false（上一次翻上去留下的）
+     *   - `scrollToItem(0)` 把位置搬到底部，但那是**这一帧之后**才发生的
+     *   - `atBottom` 要等下一次重组才变 true，而 `frozen` 在此期间还是 true
+     *   - 冻着的时候流式增量只进缓冲不落进列表 → **看起来就是「没跟随」**
+     *
+     * 而「我发了话，当然要从我这句话看起」是唯一没有例外的情形：刚发出去的人
+     * 不可能想在旧位置上等回复。
+     */
+    fun onUserSent() {
+        frozen = false
+    }
+
+    /** 解冻：节流窗口里攒下的增量一次性落账（最多也就几十毫秒的 token） */
+    private fun flushPending() {
+        publishStream(force = true)
+    }
+
+    /**
+     * 无条件把缓冲落进最后一条，**绕过冻结**。
+     *
+     * 只在一个地方用：用户又发新消息、而上一条还冻着的时候。
+     * 不先落账就 resetStreamBuffer 的话，缓冲里那截正文会被直接丢掉 ——
+     * 存档里是完整的（persistCurrent 读缓冲），屏幕上却短一截，
+     * 同一个会话在历史面板和在聊天气泡里长得不一样。
+     */
+    private fun commitStreamBuffer() {
+        if (streamText.isEmpty() && streamReasoning.isEmpty()) return
+        val reasoning = streamReasoning.toString()
+        val text = streamText.toString()
+        lastPublishAt = System.currentTimeMillis()
+        replaceLast { m -> m.copy(reasoning = reasoning, text = text) }
+    }
+
+    private fun resetStreamBuffer() {
+        streamReasoning.setLength(0)
+        streamText.setLength(0)
+        lastPublishAt = 0L
+        // 必须一起清：换会话/换问题后如果还留着旧时间戳，新会话的头几个
+        // delta 会因为"距上次存档已久"立刻触发一次写盘，白写一遍。
+        // 反过来不清也只是多写一次，不会丢数据 —— 但这里清掉是为了语义干净。
+        lastCheckpointAt = 0L
+    }
+
+    /** 收到增量：先攒进 builder，再按自适应节流发布（见 streamPublishIntervalMs） */
+    private fun appendStream(reasoning: String = "", text: String = "") {
+        if (reasoning.isNotEmpty()) streamReasoning.append(reasoning)
+        if (text.isNotEmpty()) streamText.append(text)
+        publishStream(force = false)
+        checkpointIfDue()
+    }
+
+    /**
+     * 流式途中定期存档。
+     *
+     * 以前只在流结束（finally）才落一次盘。那意味着**进程被系统杀掉 /
+     * 用户划掉最近任务**时，整段生成一个字都留不下 —— 而生成一篇大纲
+     * 分析动辄一两分钟，这一下午的心血就没了。
+     *
+     * 退出页面现在靠 Activity 作用域的 ViewModel 续着跑（见导航图注释），
+     * 但那只扛得住"切页面"，扛不住"进程没了"。所以这里按 CHECKPOINT_INTERVAL_MS
+     * 额外存一次：最坏情况只丢最后几秒。
+     *
+     * 存档读的是缓冲全文（currentMessagesForPersistence），所以**冻结期间
+     * 照样存** —— 用户翻上去不想看动，但落盘必须完整。
+     */
+    private fun checkpointIfDue() {
+        if (streamText.isEmpty() && streamReasoning.isEmpty()) return
+        val now = System.currentTimeMillis()
+        if (now - lastCheckpointAt < CHECKPOINT_INTERVAL_MS) return
+        // 记时间要在这里面，不能等 persistCurrent 真正写完：
+        // 写盘是异步的，连续几个 delta 都会满足"距上次超过间隔"，
+        // 结果就是每个 token 都触发一次存档。
+        lastCheckpointAt = now
+        persistCurrent()
+    }
+
+    /**
+     * 把 builder 里的内容拍快照发布到最后一条消息上。
+     *
+     * 两道闸，顺序不能反：
+     * 1. **冻结闸**（frozen）—— 用户不在看最新内容时一个字都不发。
+     * 2. **节流闸** —— force = true（解冻）时无视节流立刻落账。
+     *
+     * 冻结闸连 force 也不放行，这是有意的：解冻路径自己会调 flushPending，
+     * 而生成结束时那一次 force 不发也没关系，因为存档已经改成直接读缓冲
+     * （见 currentMessagesForPersistence），不依赖渲染层追上来。
+     */
+    private fun publishStream(force: Boolean) {
+        if (streamReasoning.isEmpty() && streamText.isEmpty()) return
+        // 冻结期间一律不发，连 force 也不发（理由见上面的 KDoc）。
+        if (frozen) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastPublishAt < streamPublishIntervalMs(streamText.length)) return
+        lastPublishAt = now
+        val reasoning = streamReasoning.toString()
+        val text = streamText.toString()
+        replaceLast { m -> m.copy(reasoning = reasoning, text = text) }
+    }
+
+    /**
+     * 只替换最后一条消息对象：前面的实例按引用原样带走，
+     * Compose 的 == 短路生效，命中缓存的子树不重组。
+     * 自适应节流让这次 N 元素拷贝的开销可以忽略。
+     */
+    private fun replaceLast(transform: (UiChatMessage) -> UiChatMessage) {
+        _messages.update { list ->
+            val index = list.lastIndex
+            if (index < 0) return@update list
+            val next = transform(list[index])
+            if (next == list[index]) list else list.subList(0, index) + next
+        }
+    }
+
+    init {
+        startScopeCollection()
+    }
+
+    /**
+     * 绑定会话归属的书。
+     *
+     * 导航图要补的一行（在 `composable("chat") { ... }` 里，viewModel 之后）：
+     * ```
+     * composable("chat?projectId={projectId}", arguments = listOf(
+     *     navArgument("projectId") { type = NavType.StringType; defaultValue = "" }
+     * )) { entry ->
+     *     val chatViewModel: ChatViewModel = viewModel(factory = ChatViewModel.Factory(...))
+     *     chatViewModel.bindProjectScope(entry.arguments?.getString("projectId"))
+     * }
+     * ```
+     * 不传 projectId（首页现在的入口）就是全局「灵感」桶，老行为不变。
+     * 生成中不切作用域：正在写的那条会话会落错桶，宁可这次不生效。
+     */
+    fun bindProjectScope(projectId: String?) {
+        val next = projectId?.trim()?.takeIf { it.isNotEmpty() }
+        if (next == _projectScope.value || _busy.value) return
+        _projectScope.value = next
+        startScopeCollection()
+    }
+
+    /** 重建作用域：丢掉上一个桶的会话与列表，改收新桶的。 */
+    private fun startScopeCollection() {
+        scopeJob?.cancel()
+        val scope = _projectScope.value
+        _conversations.value = emptyList()
+        _messages.value = emptyList()
+        _error.value = null
+        _activeId.value = ""
+        scopeJob = viewModelScope.launch {
+            launch {
+                historyStore.conversationsIn(scope).collect { _conversations.value = it }
+            }
+            launch {
+                val latest = historyStore.conversationsIn(scope).first().firstOrNull { it.messages.isNotEmpty() }
+                if (latest != null) {
+                    _activeId.value = latest.id
+                    _messages.value = latest.messages.map { m -> m.toUiMessage() }
+                    _thinkingEnabled.value = latest.thinkingEnabled
+                } else {
+                    _activeId.value = newConversationId()
+                }
+            }
+        }
+    }
+
+    private fun newConversationId(): String =
+        "c-${System.currentTimeMillis()}-${(1000..9999).random()}"
+
+    /**
+     * 要存档的会话内容。
+     *
+     * 关键：最后一条要用 **buffer 里的全文**，不能直接用 `_messages`。
+     * 用户翻到上面去时渲染层是冻结的（publishStream 直接 return），
+     * `_messages` 里的最后一条会比真实内容短一截 —— 拿它存档就是
+     * **静默把一段没写完的回答存进历史**，而且没有任何报错。
+     * 所以存档和渲染必须解耦：渲染可以为了手感冻结，存档永远取全文。
+     */
+    private fun currentMessagesForPersistence(): List<UiChatMessage> {
+        val messages = _messages.value
+        if (streamText.isEmpty() && streamReasoning.isEmpty()) return messages
+        val last = messages.lastOrNull() ?: return messages
+        if (last.role != ChatRole.ASSISTANT) return messages
+        return messages.dropLast(1) + last.copy(
+            text = streamText.toString(),
+            reasoning = streamReasoning.toString()
+        )
+    }
+
+    /**
+     * 组出要落盘的会话；没有可存的内容时返回 null。
+     *
+     * 抽出来是因为 persistCurrent（viewModelScope）和 onCleared 兜底
+     * （应用级 scope）要用同一份逻辑 —— 两边算法一旦分叉，
+     * 就会变成"正常退出存的东西"和"崩溃时存的东西"不一样。
+     */
+    private fun buildConversationForPersistence(): StoredConversation? {
+        val id = _activeId.value
+        if (id.isEmpty()) return null
+        val snapshot = currentMessagesForPersistence()
+            .filter { it.text.isNotBlank() || it.reasoning.isNotBlank() }
+        if (snapshot.isEmpty()) return null
+        val title = snapshot.firstOrNull { it.role == ChatRole.USER }?.text?.trim()?.take(24)
+            ?: "新对话"
+        return StoredConversation(
+            id = id,
+            title = title,
+            updatedAt = System.currentTimeMillis(),
+            messages = snapshot.map { m ->
+                StoredChatMessage(
+                    role = if (m.role == ChatRole.USER) "user" else "assistant",
+                    text = m.text,
+                    reasoning = m.reasoning,
+                    attachments = m.attachments,
+                    // 还在流就是"没说完"。这份快照既用于正常存档也用于
+                    // onCleared 兜底，两种情况下"正在流"都等于内容不完整。
+                    interrupted = m.interrupted || (_busy.value && m.streaming)
+                )
+            },
+            // 落进当前作用域的桶：没有书上下文就是全局「灵感」桶
+            projectId = _projectScope.value,
+            // 必须带上：persistCurrent 每次发消息都会整段重写会话，
+            // 不带这个字段的话，用户刚关掉的「思考」会被下一次发送悄悄改回开着
+            thinkingEnabled = _thinkingEnabled.value
+        )
+    }
+
+    private fun persistCurrent() {
+        val conversation = buildConversationForPersistence() ?: return
+        viewModelScope.launch { runCatching { historyStore.save(conversation) } }
+    }
+
+    /**
+     * 输入框上方待发送的附件。发送成功才落到消息上；用户中途删掉或退出，
+     * 走 clearPendingAttachments 时要把落盘的文件一并删掉，否则攒一堆孤儿图。
+     */
+    private val _pendingAttachments = MutableStateFlow<List<StoredAttachment>>(emptyList())
+    val pendingAttachments: StateFlow<List<StoredAttachment>> = _pendingAttachments.asStateFlow()
+
+    private val _attachmentNotice = MutableStateFlow<String?>(null)
+    val attachmentNotice: StateFlow<String?> = _attachmentNotice.asStateFlow()
+
+    fun addImageAttachment(uri: android.net.Uri, displayName: String) {
+        viewModelScope.launch {
+            _attachmentNotice.value = null
+            attachmentStore.saveImage(uri, displayName)
+                .onSuccess { _pendingAttachments.update { it + it } }
+                .onFailure { _attachmentNotice.value = it.message ?: "无法添加这张图片" }
+        }
+    }
+
+    fun addDocumentAttachment(uri: android.net.Uri, displayName: String) {
+        viewModelScope.launch {
+            _attachmentNotice.value = null
+            attachmentStore.saveDocument(uri, displayName)
+                .onSuccess { _pendingAttachments.update { it + it } }
+                .onFailure { _attachmentNotice.value = it.message ?: "无法添加这个文件" }
+        }
+    }
+
+    fun removePendingAttachment(stored: StoredAttachment) {
+        _pendingAttachments.update { it - stored }
+        viewModelScope.launch { attachmentStore.delete(stored) }
+    }
+
+    fun clearPendingAttachments() {
+        val current = _pendingAttachments.value
+        _pendingAttachments.value = emptyList()
+        viewModelScope.launch { current.forEach { attachmentStore.delete(it) } }
+    }
+
+    fun clearAttachmentNotice() {
+        _attachmentNotice.value = null
+    }
+
+    /**
+     * 由界面直接写一条附件提示 —— 选择器打不开这类「连回调都进不去」的失败。
+     *
+     * 这类失败以前根本无处可说：`addImageAttachment` 的提示只在**回调被调用之后**
+     * 才可能写，而选择器没弹出来时回调压根不触发。于是用户点「＋ → 图片」，
+     * 什么都没发生，界面上一句话也没有 —— 一个纯哑的按钮。
+     */
+    fun setAttachmentNotice(message: String) {
+        _attachmentNotice.value = message
+    }
+
+    fun send(input: String) {
+        val text = input.trim()
+        val pending = _pendingAttachments.value
+        val thinkingOn = _thinkingEnabled.value
+        // 光图没字也是一次有效提问（「这是什么？」不必打字），所以不能只判 text
+        if ((text.isEmpty() && pending.isEmpty()) || _busy.value) return
+        _error.value = null
+        _attachmentNotice.value = null
+        _busy.value = true
+        _pendingAttachments.value = emptyList()
+        // 上一条如果还冻着（用户翻上去看了），缓冲里可能还有没发布的正文。
+        // 必须先绕过冻结落账再清缓冲，否则那截正文就此消失 ——
+        // 存档里是全的、气泡里是短的，同一段话两个样子。
+        commitStreamBuffer()
+        resetStreamBuffer()
+        _messages.update {
+            it + UiChatMessage(ChatRole.USER, text, attachments = pending) +
+                UiChatMessage(ChatRole.ASSISTANT, "", streaming = true)
+        }
+        persistCurrent()
+        val startedAt = System.currentTimeMillis()
+        streamJob = viewModelScope.launch {
+            var providerName: String? = null
+            var modelName: String? = null
+            try {
+                val settings = settingsStore.settings.first()
+                val apiKey = apiKeyStore.read()
+                    ?: throw IllegalStateException("请先在「设置 → 连接」中保存 API Key")
+                // 灵感助手的思考是**每组对话自己的开关**（thinkingOn），
+                // 不是全局「关闭思考模式」的附庸 —— 见下面 521 行和 1094 行。
+                // （这里原来写的是「强制带思考：不受全局关闭思考模式影响」，
+                //  那是改之前的样子，照着它会以为改不了。）
+                val config = LLMConnectionConfig(
+                    baseUrl = settings.baseUrl.trim(),
+                    apiKey = apiKey,
+                    model = settings.model.trim(),
+                    capabilities = ProviderCapabilities(
+                        supportsStreaming = true,
+                        supportsJsonObject = false,
+                        supportsUsageInStream = false
+                    ),
+                    // 关掉思考时要**明确告诉服务商别思考**（disableThinking）。
+                    // 只把 includeReasoning 设为 false 是不够的：不少模型照样先
+                    // thinking 很久，只是不把过程返回给你，表现就是「关了还是慢」。
+                    disableThinking = !thinkingOn
+                )
+                providerName = settings.providerName
+                modelName = settings.model
+                val history = _messages.value
+                    .dropLast(1)
+                    .filter { it.text.isNotBlank() || it.attachments.isNotEmpty() }
+                // 请求每轮都重发整段会话。图片如果全带，几轮之后请求体就是几 MB，
+                // 网关上限普遍 4–10 MB，超了只回一个没有信息量的 invalid request。
+                // 所以只带最近若干条消息的附件，更早的图明确告诉用户没带。
+                val attachmentCutoff = (history.size - ATTACHMENT_HISTORY_MESSAGES).coerceAtLeast(0)
+                var omittedAttachments = 0
+                val messages = history.mapIndexed { index, message ->
+                    val include = index >= attachmentCutoff
+                    if (!include) omittedAttachments += message.attachments.size
+                    val wire = if (include) {
+                        message.attachments.mapNotNull { attachmentStore.toChatAttachment(it) }
+                    } else {
+                        emptyList()
+                    }
+                    if (message.attachments.isNotEmpty() && wire.size < message.attachments.size) {
+                        omittedAttachments += message.attachments.size - wire.size
+                    }
+                    ChatMessage(message.role, message.text, wire)
+                }
+                if (omittedAttachments > 0) {
+                    _attachmentNotice.value =
+                        "更早的 $omittedAttachments 个附件没有包含在这次请求里（历史太长时会自动省略）"
+                }
+                val request = ChatRequest(
+                    messages = listOf(ChatMessage(ChatRole.SYSTEM, INSPIRATION_SYSTEM_PROMPT)) + messages,
+                    config = config,
+                    options = ChatOptions(
+                        outputTokenBudget = 4_096,
+                        requestId = "chat-${System.currentTimeMillis()}",
+                        stream = true,
+                        includeReasoning = thinkingOn
+                    )
+                )
+                var received = false
+                var streamUsage: com.novelforge.app.domain.model.LlmUsage? = null
+                client.streamChat(request).collect { event ->
+                    when (event) {
+                        is StreamEvent.Reasoning -> {
+                            received = true
+                            appendStream(reasoning = event.text)
+                        }
+                        is StreamEvent.Delta -> {
+                            received = true
+                            appendStream(text = event.text)
+                        }
+                        is StreamEvent.Usage -> streamUsage = event.usage
+                        is StreamEvent.Finished -> Unit
+                        else -> Unit
+                    }
+                }
+                recordCall(settings.providerName, settings.model, startedAt, streamUsage, received)
+                if (!received) {
+                    replaceLast { m ->
+                        if (m.text.isEmpty()) m.copy(text = "（模型没有返回内容，可重试）") else m
+                    }
+                }
+            } catch (ce: CancellationException) {
+                // 用户点了停止：把缓冲的增量落账，空响应则标"已停止"，保留已生成的部分
+                flushPending()
+                replaceLast { m ->
+                    if (m.text.isBlank() && m.reasoning.isBlank()) {
+                        m.copy(text = "（已停止）")
+                    } else {
+                        m
+                    }
+                }
+                throw ce
+            } catch (e: Throwable) {
+                recordCall(providerName, modelName, startedAt, null, false)
+                _error.value = e.message ?: "请求失败"
+                replaceLast { m ->
+                    if (m.text.isEmpty()) {
+                        m.copy(text = "（生成失败：${e.message ?: "未知错误"}）")
+                    } else {
+                        m
+                    }
+                }
+            } finally {
+                _busy.value = false
+                streamJob = null
+                // 结束/取消/失败都要无视节流补齐一次，否则最后几十毫秒的 token 全丢
+                publishStream(force = true)
+                replaceLast { m -> m.copy(streaming = false) }
+                persistCurrent()
+            }
+        }
+    }
+
+    /** 对话调用也入账本（llm_calls）：失败/中断也记一条，token 拿不到就留空 */
+    private fun recordCall(
+        providerName: String?,
+        modelName: String?,
+        startedAt: Long,
+        usage: com.novelforge.app.domain.model.LlmUsage?,
+        success: Boolean
+    ) {
+        viewModelScope.launch {
+            runCatching {
+                llmCallRepository.save(
+                    com.novelforge.app.domain.model.LlmCall(
+                        id = java.util.UUID.randomUUID().toString(),
+                        // 记账跟着作用域走：有书上下文时能按书筛出这次灵感对话
+                        projectId = _projectScope.value.orEmpty(),
+                        jobId = "chat-${System.currentTimeMillis()}",
+                        purpose = com.novelforge.app.domain.model.GenerationPurpose.CHAT,
+                        provider = providerName?.takeIf { it.isNotBlank() } ?: "未知",
+                        model = modelName?.takeIf { it.isNotBlank() } ?: "未知",
+                        usage = usage ?: com.novelforge.app.domain.model.LlmUsage(),
+                        durationMs = System.currentTimeMillis() - startedAt,
+                        success = success,
+                        createdAt = System.currentTimeMillis()
+                    )
+                )
+            }
+        }
+    }
+
+    /** 清空当前对话（含其历史记录） */
+    fun clear() {
+        resetStreamBuffer()
+        _messages.value = emptyList()
+        _error.value = null
+        val id = _activeId.value
+        if (id.isNotEmpty()) {
+            viewModelScope.launch { historyStore.delete(id, _projectScope.value) }
+        }
+    }
+
+    fun newConversation() {
+        if (_busy.value) return
+        resetStreamBuffer()
+        _messages.value = emptyList()
+        _error.value = null
+        _activeId.value = newConversationId()
+    }
+
+    private val _thinkingEnabled = MutableStateFlow(true)
+    val thinkingEnabled: StateFlow<Boolean> = _thinkingEnabled.asStateFlow()
+
+    /**
+     * 切换「显示思考过程」。
+     *
+     * 关掉时两件事一起做：不给模型要 reasoning_content，同时明确告诉服务商别思考。
+     * 只做前者不够 —— 有些模型照样先 thinking 很久，只是不返回给你，
+     * 表现出来就是「关了还是慢」。请求上带 disableThinking 才是真关。
+     */
+    fun setThinking(enabled: Boolean) {
+        _thinkingEnabled.value = enabled
+        viewModelScope.launch {
+            runCatching {
+                val id = _activeId.value
+                if (id.isEmpty()) return@launch
+                historyStore.updateThinking(id, _projectScope.value, enabled)
+            }
+        }
+    }
+
+    fun openConversation(id: String) {
+        if (_busy.value || id == _activeId.value) return
+        val convo = _conversations.value.firstOrNull { it.id == id } ?: return
+        resetStreamBuffer()
+        _error.value = null
+        _activeId.value = id
+        // 思考开关是**按会话**记的：换一段对话就该用那段自己的设置
+        _thinkingEnabled.value = convo.thinkingEnabled
+        _messages.value = convo.messages.map { m -> m.toUiMessage() }
+    }
+
+    fun deleteConversation(id: String) {
+        if (_busy.value) return
+        viewModelScope.launch {
+            historyStore.delete(id, _projectScope.value)
+            if (id == _activeId.value) {
+                _messages.value = emptyList()
+                _activeId.value = newConversationId()
+            }
+            collectAttachmentGarbage()
+        }
+    }
+
+    /**
+     * 清掉不再被任何会话引用的附件文件。
+     * 会话被删、消息被 trim 到只剩 40 条之后，孤儿图会一直堆着 ——
+     * 一次多图对话就能塞进几十 MB，而它们再也不会被读到。
+     */
+    private suspend fun collectAttachmentGarbage() {
+        runCatching {
+            val referenced = historyStore.conversationsIn(_projectScope.value).first()
+                .flatMap { conversation -> conversation.messages }
+                .flatMap { message -> message.attachments }
+                .map { it.path } + _pendingAttachments.value.map { it.path }
+            attachmentStore.collectGarbage(referenced)
+        }
+    }
+
+    override fun onCleared() {
+        // 先落盘再收尾。onCleared 是在 viewModelScope **已经取消之后**才回调的，
+        // 所以这里再往 viewModelScope 里 launch 存档是必然跑不到的 ——
+        // 协程一创建就被取消，一次都执行不了。
+        //
+        // 用应用级 scope 兜底：它比 ViewModel 活得久，写得完。
+        // 这条只在真正要消失时兜底（正常退出页面现在不会走到这里，
+        // 因为 ViewModel 挂在 Activity 上）；流式途中的定期存档见 checkpointIfDue。
+        val conversation = buildConversationForPersistence()
+        if (conversation != null) {
+            // 不阻塞主线程：DataStore 写盘在 IO 上跑。
+            // 不用 viewModelScope：它此刻已经取消，launch 进去必然跑不到。
+            // 这里也不需要取消 —— 写完就没了，跑不掉反而是想要的。
+            applicationScope.launch {
+                runCatching { historyStore.save(conversation) }
+            }
+        }
+        // ViewModel 消失时把还没发出去的附件清掉：它们永远不会进任何消息
+        clearPendingAttachments()
+        super.onCleared()
+    }
+
+    class Factory(
+        private val settingsStore: AppSettingsStore,
+        private val apiKeyStore: ApiKeyStore,
+        private val client: OpenAiCompatibleClient,
+        private val historyStore: ChatHistoryStore,
+        private val llmCallRepository: com.novelforge.app.domain.repository.LlmCallRepository,
+        private val attachmentStore: com.novelforge.app.data.chat.ChatAttachmentStore,
+        private val applicationScope: CoroutineScope
+    ) : ViewModelProvider.Factory {
+        @Suppress("UNCHECKED_CAST")
+        override fun <T : ViewModel> create(modelClass: Class<T>): T = ChatViewModel(
+            settingsStore,
+            apiKeyStore,
+            client,
+            historyStore,
+            llmCallRepository,
+            attachmentStore,
+            applicationScope
+        ) as T
+    }
+}
+
+/**
+ * 历史里最多带多少条消息的附件。
+ *
+ * 请求每轮重发整段会话，图片全带的话几轮之后请求体就是几 MB，
+ * 而 OpenAI 兼容网关的请求体上限普遍在 4–10 MB，超了只回一个
+ * 没有信息量的 invalid request。留最近 4 条既能维持"你刚发的那张图我还记得"，
+ * 又把最坏情况钉住。省略了多少会在界面上明说，不静默。
+ */
+private const val ATTACHMENT_HISTORY_MESSAGES = 4
+
+/**
+ * 发布节流：按正文长度自适应，而不是固定 20Hz。
+ *
+ * ## 这里的理由换过一次，之前那份是错的
+ *
+ * 旧注释说：「每发布一次，Compose 要给最后一条重排一遍 —— 换行、CJK 断字、
+ * 整段 MultiParagraph 重建，而这部分随正文变长而变贵」，据此把上限压到 250ms。
+ *
+ * **这个前提已经不成立了**（用户原话：「跟随滑动因为渲染的问题还是感觉卡卡的」）：
+ * - 排版是**按段落**的，不是按整篇。`remember(source, …)` 逐块缓存，
+ *   流式时只有**尾部那一块**拿到新的 AnnotatedString，只有它重建 MultiParagraph。
+ * - 逐块缓存是后加的。写这份注释时还没有它，所以「整段重建」当时是真的。
+ * - 实测（`StreamingParseBenchmarkTest`、`MarkdownInline` 探针）：最坏的单块
+ *   解析恒定在 0.017–0.035ms，**不随整篇长度增长**。整篇 5000 字重解析
+ *   也只要 0.1–0.3ms。
+ *
+ * 也就是说：**单次发布的开销由尾部那一块决定，跟正文多长基本无关。**
+ * 既然如此，就没理由让长回答的刷新频率掉到 4Hz。
+ *
+ * ## 为什么 4Hz 看着就是卡
+ *
+ * `reverseLayout = true`，第一条钉在视口底部，内容往上长。于是每发布一次，
+ * **整个视口**平移「这一段时间新到的那几行」的高度。
+ *
+ * 4Hz 配上一个写得慢的模型，就是每秒 4 次、每次 30–60px 的整体位移 ——
+ * 眼睛读这个就是「一跳一跳」，跟单次耗时够不够没关系。
+ * 旧注释自己也写了「250ms 是上限。再慢就明显能看出『一跳一跳』了」，
+ * 而 8000 字以上的回答**正好顶在 250ms**。所以那条上限当时就设在了一个
+ * 自己声明「不能超过」的位置上。
+ *
+ * ## 现在的取值
+ *
+ * 50ms（短回答，跟手）→ 4000 字 116ms（8.6Hz）→ 6000 字以上封顶 150ms（6.7Hz）。
+ * 斜率从 `chars/25` 放宽到 `chars/60`：既然单次开销不随长度涨，
+ * 长度只该轻微地影响刷新率，不该主导它。
+ *
+ * **诚实的上限**：6.7Hz 仍然是 6.7 次离散跳变，不是 60fps 的连续滚动。
+ * 这次会明显改善手感，但不会变成丝滑。要彻底解决得缩小重组范围
+ * （让 `items {}` 的内容 lambda 引用稳定，把每条消息的状态提到外面），
+ * 那是结构改动，代价大且没法在真机之外验证。
+ */
+internal fun streamPublishIntervalMs(chars: Int): Long = when {
+    chars <= 400 -> 50L
+    else -> (50L + chars / 60L).coerceAtMost(150L)
+}
+
+/**
+ * 流式途中每隔多久往磁盘存一次。
+ *
+ * 只为了扛住"进程被系统杀掉"：退出页面已经靠 Activity 作用域的 ViewModel
+ * 续上了（见导航图注释），进程没了就只能靠定期落盘。
+ *
+ * 3 秒是个折中：一次存档要把整段会话序列化成 JSON 写进 DataStore，
+ * 太频繁会拖慢流；太长则崩溃时丢得多。一两分钟的生成最多丢最后 3 秒。
+ */
+private const val CHECKPOINT_INTERVAL_MS = 3_000L
+
+private fun StoredChatMessage.toUiMessage(): UiChatMessage = UiChatMessage(
+    role = if (role == "user") ChatRole.USER else ChatRole.ASSISTANT,
+    text = text,
+    reasoning = reasoning,
+    attachments = attachments,
+    interrupted = interrupted
+)
+
+private val UserBubbleShape = RoundedCornerShape(20.dp, 6.dp, 20.dp, 20.dp)
+private val AssistantBubbleShape = RoundedCornerShape(6.dp, 20.dp, 20.dp, 20.dp)
+
+// 原来这里有两个常量：REASONING_PREVIEW_LINES = 8、REASONING_PREVIEW_CHARS = 300，
+// 用来做「思考超过一定长度就截断 + 展开全部」。两个都删了 ——
+// 折叠只由「思考结束没有」决定，长度不参与。理由见折叠处那段注释。
+
+private val chatTimeFormat = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+
+/**
+ * 一行附件。图片显示缩略图，文档显示文件名。
+ *
+ * 缩略图**按需在 IO 线程解码**并按显示尺寸采样：一张 1568px 的图按原尺寸塞进气泡
+ * 就是 1.5 MB 乘以列表长度，而在组合期解会直接卡住滚动。
+ * 文件已经被删（清理过、或历史从别处导入）时只显示占位，不崩。
+ * onRemove 非空时右上角有删除键；用户气泡里传 null —— 已经发出去的消息不该能删附件。
+ */
+@Composable
+private fun AttachmentStrip(
+    attachments: List<StoredAttachment>,
+    tint: Color,
+    onRemove: ((StoredAttachment) -> Unit)?,
+    modifier: Modifier = Modifier
+) {
+    if (attachments.isEmpty()) return
+    val context = LocalContext.current
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        attachments.forEach { stored ->
+            val isImage = stored.mediaType.startsWith("image/")
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(2.dp)
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        // 边框而不是底色：底色 10% 透明度在纸色背景上基本看不出边界，
+                        // 结果是"这个格子到底存不存在"都看不出来。
+                        .border(1.dp, tint.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+                        .background(tint.copy(alpha = 0.10f))
+                        .clickable(enabled = isImage) { if (isImage) openImage(context, stored.path) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isImage) {
+                        val bitmap by produceState<android.graphics.Bitmap?>(null, stored.path) {
+                            value = withContext(Dispatchers.IO) {
+                                runCatching { decodeAttachmentThumbnail(stored.path) }.getOrNull()
+                            }
+                        }
+                        val image = bitmap
+                        if (image != null) {
+                            Image(
+                                bitmap = image.asImageBitmap(),
+                                contentDescription = "附件 ${stored.name}",
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            // 原来是一个 10% 底色的「▨」。那个透明度低到几乎看不见 ——
+                            // 缩略图解不出来时，用户看到的就是"什么都没有"，
+                            // 而附件其实已经在发送队列里了。
+                            // 这里改成有边框的方块 + 一个能认出来的字，
+                            // 至少能看出"这里有一张图，只是预览不出来"。
+                            // 静默降级成空白比报错更糟：报错至少会让人去查。
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(1.dp)
+                            ) {
+                                Text("▨", color = tint, style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    "读不出",
+                                    color = tint,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        }
+                    } else {
+                        Text("📄", fontSize = 20.sp)
+                    }
+                    if (onRemove != null) {
+                        Text(
+                            "✕",
+                            color = tint,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .clip(CircleShape)
+                                .background(tint.copy(alpha = 0.18f))
+                                .clickable { onRemove(stored) }
+                                .defaultMinSize(minWidth = 24.dp, minHeight = 24.dp)
+                                .wrapContentSize(Alignment.Center)
+                        )
+                    }
+                }
+                if (!isImage) {
+                    Text(
+                        stored.name,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = tint.copy(alpha = 0.8f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.width(72.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 附件缩略图：按 128px 采样，RGB_565。 */
+private fun decodeAttachmentThumbnail(path: String): android.graphics.Bitmap? {
+    val file = java.io.File(path)
+    if (!file.exists()) return null
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    android.graphics.BitmapFactory.decodeFile(path, bounds)
+    if (bounds.outWidth <= 0) return null
+    var sample = 1
+    while (bounds.outWidth / (sample * 2) >= 128) sample *= 2
+    return runCatching {
+        android.graphics.BitmapFactory.decodeFile(
+            path,
+            android.graphics.BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = android.graphics.Bitmap.Config.RGB_565
+            }
+        )
+    }.getOrNull()
+}
+
+/**
+ * 点开附件大图。
+ *
+ * 复用已有的那个 FileProvider（authority `${applicationId}.files`），
+ * 并且必须落在它暴露的 `cache/exports/` 下面 —— 应用私有目录外部程序读不到，
+ * 而 file_paths.xml 只声明了 exports/ 和 external-files/NovelForge/，
+ * 写到别处会直接抛 IllegalArgumentException。
+ */
+private fun openImage(context: android.content.Context, path: String) {
+    runCatching {
+        val file = java.io.File(path)
+        if (!file.exists()) return
+        val shareDir = java.io.File(context.cacheDir, "exports").apply { if (!exists()) mkdirs() }
+        val shared = java.io.File(shareDir, "share-${file.name}")
+        if (!shared.exists() || shared.length() == 0L) file.copyTo(shared, overwrite = true)
+        val uri = androidx.core.content.FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.files",
+            shared
+        )
+        context.startActivity(
+            android.content.Intent(android.content.Intent.ACTION_VIEW)
+                .setDataAndType(uri, "image/jpeg")
+                .addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        )
+    }
+}
+
+/** 取附件显示名，拿不到就用末段文件名。 */private fun queryDisplayName(context: android.content.Context, uri: android.net.Uri): String {
+    val fromProvider = runCatching {
+        context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
+        }
+    }.getOrNull()
+    return fromProvider?.takeIf { it.isNotBlank() }
+        ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { it.isNotBlank() }
+        ?: "附件"
+}
+
+/**
+ * 整段复制到剪贴板 —— **已删除**。
+ *
+ * 它唯一的调用方是那行每条消息下面的「复制」按钮（`CopyRow`），按钮删了之后
+ * 就没有调用方了。留着等于给下一个人留了个零件：照着 git log 就能把它捡回来，
+ * 再把按钮挂回每条气泡下面。
+ *
+ * 现在整条复制走系统：长按正文 → 系统选择工具栏（复制 / 全选 / 分享）。
+ */
+@Suppress("unused")
+private fun copyToClipboardRemovedOnPurpose() {
+}
+
+/**
+ * 气泡下方的复制按钮行 —— **已删除**。
+ *
+ * 这里是它当初为什么被加上去、现在为什么又该拿掉：
+ *
+ * 最早的整条复制是给气泡挂 `pointerInput { detectTapGestures(onLongPress = …) }`。
+ * 那个 API 会 `down.consume()`，把外层 `SelectionContainer` 的长按选词整个吃掉
+ * —— 系统工具栏（复制 / 全选 / 分享）全废，只在默认配置下或换成 assistant
+ * 气泡才碰巧没事。依赖它就是等着某天换配置时静默弄坏选词。
+ *
+ * 于是改成这个：正文下面一行「复制」按钮，和选词共存（摆在竖向流里不叠字）。
+ * 但用户明确不要 —— **每条回复下面挂一行按钮，聊天记录被切得七零八落，
+ * 而且点它就在动正文，干扰读。**
+ *
+ * 现在：**一个多余手势都不加**。整条复制走系统自己的路 ——
+ * 长按正文 → 系统选择工具栏（复制 / 全选 / 分享）。这也是用户要的样子：
+ * 「是长按复制」。长按本来就要留给选词，两者不冲突。
+ *
+ * 代价是「一键复制整条」没了：得长按 → 全选 → 复制三下。换来的是
+ * 屏幕上没有任何不属于对话内容的元素。
+ */
+@Suppress("unused")
+private fun CopyRowRemovedOnPurpose() {
+    // 刻意留一个空壳函数，让「这个概念已经不存在」在代码里有个位置，
+    // 而不是让下一个人照着 git log 里那版再实现一遍。
+    // 真要复制：长按正文 → 系统选择工具栏 → 复制。
+}
+
+/**
+ * 复制按钮 —— **已删除**。理由见上面 [CopyRowRemovedOnPurpose]。
+ */
+@Suppress("unused")
+private fun CopyButtonRemovedOnPurpose() {
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+fun ChatScreen(
+    viewModel: ChatViewModel,
+    onBack: () -> Unit
+) {
+    val messages by viewModel.messages.collectAsStateWithLifecycle()
+    val busy by viewModel.busy.collectAsStateWithLifecycle()
+    // 附件显示名、点开大图都要用
+    val context = LocalContext.current
+    val error by viewModel.error.collectAsStateWithLifecycle()
+    val conversations by viewModel.conversations.collectAsStateWithLifecycle()
+    val activeId by viewModel.activeId.collectAsStateWithLifecycle()
+    var input by remember { mutableStateOf("") }
+    var historyOpen by remember { mutableStateOf(false) }
+    var touching by remember { mutableStateOf(false) }
+    var pickerMenuOpen by remember { mutableStateOf(false) }
+    val thinkingOn by viewModel.thinkingEnabled.collectAsStateWithLifecycle()
+    val pendingAttachments by viewModel.pendingAttachments.collectAsStateWithLifecycle()
+    val attachmentNotice by viewModel.attachmentNotice.collectAsStateWithLifecycle()
+    // 破坏性操作先记在这里，等用户点确认才真的动手
+    var confirmClear by remember { mutableStateOf(false) }
+    var deleteTarget by remember { mutableStateOf<StoredConversation?>(null) }
+    val listState = rememberLazyListState()
+    val scope = rememberCoroutineScope()
+    // reverseLayout 下要反着喂给 items；只算一次，别在每 50ms 的一次流式重组里重排
+    val reversed = remember(messages) { messages.asReversed() }
+    // 绝对底部 = reverseLayout 位置恰好 (0,0)。只要偏离一丁点（哪怕生成中的
+    // 气泡只露出开头一点），立即冻结列表刷新——其他时候只听手势。
+    val atBottom by remember {
+        derivedStateOf {
+            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset == 0
+        }
+    }
+    // 手指抬起来之后 fling 还在继续，那段时间 touching 已经是 false。
+    // 不看 isScrollInProgress 就会在惯性滚动途中解冻，页面当场抽搐一下。
+    val scrolling by remember { derivedStateOf { listState.isScrollInProgress } }
+    LaunchedEffect(atBottom, scrolling, touching) {
+        viewModel.setFrozen(!atBottom || scrolling || touching)
+    }
+
+    // 键盘收起时「先触底（底栏冒出来）再弹回」——修这个。
+    //
+    // ## 两个东西在打架
+    //
+    //  - 消息区是 `reverseLayout = true` 的 LazyColumn。reverseLayout 下**第一条
+    //    钉在视口底部**，内容往上长，视口一变它就按「第一条仍在底部」重新锚定。
+    //  - 视口高度在键盘收起时连续变大几百毫秒（`imePadding()` 的 inset 动画回 0），
+    //    动画**结束的那一刻底栏又冒出来**，视口再缩一次。
+    //
+    // 用户离开底部时，重锚定就会把内容整体推走 —— 于是先看到它冲到最底下，
+    // 然后才被拉回来。
+    //
+    // ## 之前的做法为什么注定是「先错后对」
+    //
+    // 旧代码等的是 `LaunchedEffect(imeVisible)`，而 `imeVisible` 是
+    // `ime.getBottom(density) > 0` 这个**布尔值**：键盘动画的整几百毫秒里它都还是
+    // true，只在 inset 归零那一刻才翻转。也就是说**修正发生在漂移全部画完之后**。
+    // 再叠上「等两帧」和底栏出现带来的第二次视口变化，用户看到的就是
+    // 「提前触底 → 底栏显示 → 弹回正常位置」这一整段。
+    //
+    // `withFrameNanos` 等两帧是拍的：键盘动画约 250ms，两帧约 33ms ——
+    // 数量级差了将近十倍，等于没等。
+    //
+    // ## 现在的做法
+    //
+    // **视口每变一次就把内容按锚点钉回去，一次一帧**，不等动画结束。
+    //
+    // 关键是把「记锚点」和「用锚点」放进**同一个 collect**：视口刚变过就说明
+    // 此刻读到的位置是被重锚定冲刷出来的，不作数 —— 钉回去而不记。
+    // 分成两条 flow 就有竞态：漂移值可能在复位之前就把锚点覆盖掉，
+    // 而视口之后不再变化时那条 flow 也就不会再触发，错误就永久留下了。
+    val density = LocalDensity.current
+    val imeVisible = WindowInsets.ime.getBottom(density) > 0
+    // 用户停在非底部时读到的锚点（reverseLayout 下 index 0 == 底部）。
+    // 用 `mutableStateOf` 只是为了跨重组存活，**不在组合里读**。
+    val anchor = remember { mutableStateOf<Pair<Int, Int>?>(null) }
+    // 上一次已知的视口高度。键盘动画、底栏出现/消失、转屏都会改它。
+    val viewportHeight = remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(listState) {
+        snapshotFlow {
+            Triple(
+                listState.firstVisibleItemIndex,
+                listState.firstVisibleItemScrollOffset,
+                listState.layoutInfo.viewportSize.height
+            )
+        }.collect { (index, offset, height) ->
+            if (index == 0 && offset == 0) {
+                // 在底部：列表本来就该跟着键盘走，不记也不钉
+                anchor.value = null
+                viewportHeight.intValue = height
+                return@collect
+            }
+            if (viewportHeight.intValue != height) {
+                // 视口刚变过 —— 此刻读到的位置是被重锚定冲刷出来的。
+                // 钉回锚点，但**不更新锚点**。
+                viewportHeight.intValue = height
+                val a = anchor.value
+                if (a != null) listState.scrollToItem(a.first, a.second)
+                return@collect
+            }
+            // 视口没动过，这就是用户自己滚到的位置
+            anchor.value = index to offset
+        }
+    }
+    // 仅在用户发出新消息的瞬间跳到底部（令牌流期间绝不主动滚动）
+    val lastRole = messages.lastOrNull()?.role
+    // 「刚发了话」用一个递增的序号来认，而不是靠 messages.size。
+    //
+    // 原来这个 effect 挂在 messages.size 上，但**发出去的那一刻** size 还没变：
+    // ViewModel 是先 append USER + 空的 ASSISTANT 才返回，而那一 append 和
+    // scrollToItem 之间隔着一次重组。冻着的时候那次 scrollToItem 打进了
+    // 一个「列表还不接受新项」的状态，命令被丢掉 —— 于是「发了话不跟随」。
+    //
+    // 现在由发送按钮直接调 onUserSent()：先解冻（onUserSent），再由这个
+    // effect 在**下一个**帧滚到底。两步都在发送那一刻发生，不再依赖 size 的时序。
+    var sendSeq by remember { mutableIntStateOf(0) }
+    LaunchedEffect(sendSeq) {
+        if (sendSeq > 0) {
+            listState.scrollToItem(0)
+        }
+    }
+    // 保留原来那条兜底：切换会话 / 恢复历史时也要到底部
+    LaunchedEffect(activeId) {
+        if (messages.isNotEmpty()) listState.scrollToItem(0)
+    }
+    // 切换/恢复会话后跳到底部
+    LaunchedEffect(activeId, messages.isNotEmpty()) {
+        if (messages.isNotEmpty()) listState.scrollToItem(0)
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .imePadding()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        PaperTopBar(
+            title = "灵感助手",
+            subtitle = "设定、段落与情节走向",
+            // 只在从书里打开时给返回。底栏进的话，三个 tab 就在下面，
+            // 「书架」一键就到，返回是纯冗余；书里进的话，那是回这本书的唯一路。
+            // 判据见 ChatViewModel.isBookScoped。
+            onBack = if (viewModel.isBookScoped()) onBack else null,
+            trailing = {
+                // 思考开关放在顶栏而不是设置页：它是「这段对话要不要我动脑子」，
+                // 属于使用姿势而不是全局偏好。设置页那个「关闭思考模式」管的是
+                // 大纲和正文生成，两者刻意分开。
+                // 「清空」搬去了历史面板：顶栏塞三样东西会把标题挤成「灵感…」，
+                // 而且破坏性操作本来就该和会话管理待在一起。
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(2.dp),
+                    // 合并成一个语义节点：不然读屏会把旁边的"思考"两个字当静态
+                    // 文字念一遍，再单独念一次开关，听起来像两样东西。
+                    // 合并后 Switch 自己贡献「开关 / 已开启」，父节点给名字。
+                    modifier = Modifier.semantics(mergeDescendants = true) {
+                        contentDescription = "显示思考过程"
+                        stateDescription = if (thinkingOn) "已开启" else "已关闭"
+                    }
+                ) {
+                    Text(
+                        "思考",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Switch(
+                        checked = thinkingOn,
+                        onCheckedChange = viewModel::setThinking,
+                        enabled = !busy
+                    )
+                }
+                TextButton(onClick = { historyOpen = !historyOpen }) {
+                    Text(if (historyOpen) "收起" else "历史")
+                }
+            }
+        )
+        if (!thinkingOn) {
+            Text(
+                "思考已关闭：回答更快、消耗更少，但看不到思考过程。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        // 消息区（reverseLayout：最新消息贴底，增长时天然跟随）
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                // 横向手势：左滑呼出对话历史，右滑关闭
+                .pointerInput(Unit) {
+                    val swipeThreshold = with(density) { 18.dp.toPx() }
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        var decided = false
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Main)
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            if (!change.pressed) break
+                            // 长按选中文字后往下拖，选择手势会逐帧 consume 位移。
+                            // 不看 consumed 的话，**单行**内拖选时 dx 一路过 18dp、
+                            // dy 约等于 0，就会被误判成横滑、把历史抽屉弹开，
+                            // 抽屉盖上来顺手把这次选词也毁了。1.4 倍的竖向压制
+                            // 只能救跨行选择，救不了单行 —— 判据得是"别人吃没吃"。
+                            // 这个 Box 是整块消息区的祖先，选择手势在更深处，
+                            // 同一帧 Main pass 上轮到它时 consume 已经发生了。
+                            if (change.isConsumed) break
+                            val dx = change.position.x - down.position.x
+                            val dy = change.position.y - down.position.y
+                            if (!decided && abs(dx) > swipeThreshold && abs(dx) > abs(dy) * 1.4f) {
+                                decided = true
+                                if (dx < 0) historyOpen = true else historyOpen = false
+                            }
+                            if (decided) change.consume()
+                        }
+                    }
+                }
+        ) {
+            if (messages.isEmpty()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(top = 48.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Text("还没有灵感？说说你的想法", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "剧情构思 · 人物设计 · 世界观设定",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "思考过程实时可见 · 对话自动存入历史",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        // 手指按下即冻结流式刷新：按住=定住，抬手且落回底部才补齐
+                        .pointerInput(Unit) {
+                            awaitEachGesture {
+                                awaitFirstDown(pass = PointerEventPass.Initial)
+                                touching = true
+                                do {
+                                    val event = awaitPointerEvent(pass = PointerEventPass.Initial)
+                                } while (event.changes.any { it.pressed })
+                                touching = false
+                            }
+                        },
+                    reverseLayout = true,
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    // key 必须是消息 id：按位置复用槽位时，流式刷新会把整棵子树重建，
+                    // 清空/换会话后思考的折叠状态还会串到别的气泡上
+                    items(reversed, key = { it.id }) { message ->
+                        val isUser = message.role == ChatRole.USER
+                        // SelectionContainer 只管选词，**绝对不要**在气泡上再装
+                        // clickable / combinedClickable / pointerInput：
+                        // 那几个都会 down.consume()，把外层选择手势的按键事件吃掉，
+                        // 长按拖选就彻底废了（全选、分享全没了）。
+                        //
+                        // 这个坑踩过两次：
+                        //  1. 最早用 pointerInput { detectTapGestures(onLongPress = …) }
+                        //     做长按复制 —— 直接把选词废了，而且只在默认配置下复现。
+                        //  2. 退一步改成气泡下面一行「复制」按钮 —— 选词保住了，但每条
+                        //     消息下面多一行，干扰阅读（用户原话：「不是这样在气泡里
+                        //     影响我看」）。
+                        // 现在：气泡上**什么都不加**。整条复制走系统选择工具栏 ——
+                        // 长按 → 全选 → 复制。长按本来就要留给选词，两者不冲突。
+                        SelectionContainer {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
+                            ) {
+                                if (isUser) {
+                                    // 默认的选中高亮是浅色半透明，压在 primary 深底上
+                                    // 几乎看不出来 —— 用户按住字以为没反应，又按一次。
+                                    // 换成 onPrimary（气泡文字色）做高亮色，深底浅字才看得见。
+                                    val onPrimary = MaterialTheme.colorScheme.onPrimary
+                                    CompositionLocalProvider(
+                                        LocalTextSelectionColors provides TextSelectionColors(
+                                            handleColor = onPrimary,
+                                            backgroundColor = onPrimary.copy(alpha = 0.35f)
+                                        )
+                                    ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth(0.82f)
+                                            .clip(UserBubbleShape)
+                                            .background(MaterialTheme.colorScheme.primary)
+                                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                                    ) {
+                                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                            // 用户自己的气泡要显示图：不然发完就不知道发出去的是哪张
+                                            AttachmentStrip(
+                                                attachments = message.attachments,
+                                                tint = MaterialTheme.colorScheme.onPrimary,
+                                                onRemove = null
+                                            )
+                                            if (message.text.isNotEmpty()) {
+                                                // 用户气泡不传 onLinkClick：传了链接会染成
+                                                // primary 色，压在 primary 底上就看不见了。
+                                                // 不传时链接带真正的 LinkAnnotation，朗读会说"链接"。
+                                                ChatRichText(
+                                                    text = message.text,
+                                                    color = MaterialTheme.colorScheme.onPrimary
+                                                )
+                                            }
+                                            // 这里原来有「自己的提问也常要复制走」的一行
+                                            // CopyRow 按钮。用户嫌它干扰阅读（每条消息下面
+                                            // 都挂一行按钮，聊天记录被切得七零八落）。
+                                            // 现在复制统一走系统：长按 → 全选 → 复制。
+                                        }
+                                    }
+                                    }
+                                } else {
+                                    Surface(
+                                        modifier = Modifier
+                                            .fillMaxWidth(0.88f)
+                                            .border(
+                                                1.dp,
+                                                MaterialTheme.colorScheme.outlineVariant,
+                                                AssistantBubbleShape
+                                            ),
+                                        shape = AssistantBubbleShape,
+                                        color = MaterialTheme.colorScheme.surface
+                                    ) {
+                                        Column(
+                                            modifier = Modifier
+                                                .padding(horizontal = 16.dp, vertical = 12.dp)
+                                        ) {
+                                            // 折叠规则只有一条：**思考结束就折起来**。
+                                            //
+                                            // 原来有两条，第二条是错的，而且方向也反了：
+                                            //
+                                            // 1) `remember(message.id) { mutableStateOf(message.streaming) }`
+                                            //    **只在首次组合时求值一次。** 流式结束把 streaming
+                                            //    翻成 false 之后这个 remember 不会重跑，所以思考
+                                            //    一旦展开就永远不会再自动折起来 —— 和「结束就折叠」
+                                            //    正好相反。keyed 的 LazyColumn 里条目是持续存在的，
+                                            //    不会因为状态变就重新组合一次。
+                                            //    现在补一个 LaunchedEffect 监听 streaming 的翻转。
+                                            //
+                                            // 2) 超过 300 字就截成 8 行 + 一个「展开全部」。按长度折叠
+                                            //    更不对：**正在生成的时候恰恰最需要看见它在想什么**，
+                                            //    而它偏偏在这时候开始截断，得再点一次才看得到，
+                                            //    而且每来一批新 token 就重新截一次。整个长度档位删掉。
+                                            //
+                                            // 初值仍然取 streaming，避免首帧先折后开地闪一下；
+                                            // effect 首次运行会写回同一个值，是空操作。
+                                            //
+                                            // 折起来之后仍然可以手动展开重看 —— effect 只在 streaming
+                                            // 变化时跑，之后用户的点击不受打扰。
+                                            var reasoningOpen by remember(message.id) {
+                                                mutableStateOf(message.streaming)
+                                            }
+                                            LaunchedEffect(message.streaming) {
+                                                reasoningOpen = message.streaming
+                                            }
+                                            if (message.reasoning.isNotBlank()) {
+                                                // 这个折叠标签是气泡里唯一"故意不让选词"的地方：
+                                                // 它自己就是手势控件，选中它没有意义。
+                                                // 但也正因为是控件，命中区得补到 48dp ——
+                                                // labelSmall 一行只有 16dp 高，长得跟普通文字一样，
+                                                // 会被当成正文去长按选词，然后发现点不动。
+                                                Text(
+                                                    // 原来写「已完成思考 · 点击展开/收起」：后半句是
+                                                    // 一条逐个气泡重复的操作说明，而折叠标签自己就在
+                                                    // 这里、又是可点的 —— 说一遍就够。改成标签自带
+                                                    // 当前状态。顺带修掉原来收着和展开着都念
+                                                    // 「展开/收起」：那个文案根本不区分这两种状态。
+                                                    when {
+                                                        message.streaming -> "思考中…"
+                                                        reasoningOpen -> "收起思考 ↑"
+                                                        else -> "展开思考 ↓"
+                                                    },
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.primary,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier
+                                                        .padding(bottom = 4.dp)
+                                                        .toggleable(
+                                                            value = reasoningOpen,
+                                                            onValueChange = { reasoningOpen = it },
+                                                            role = Role.Button
+                                                        )
+                                                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                                        .semantics {
+                                                            stateDescription =
+                                                                if (reasoningOpen) "已展开" else "已收起"
+                                                        }
+                                                )
+                                                if (reasoningOpen) {
+                                                    // 不截断、不限行。展开就整段铺开。
+                                                    //
+                                                    // 原来是 maxLines = 8 + 省略号，再加一个「展开全部」
+                                                    // —— 两个问题：生成中你最想看它在想什么，它偏偏这时
+                                                    // 开始截断；而且每来一批 token 就重新截一次，得反复
+                                                    // 点。现在只有「结束就折起来」这一个状态，长度不参与。
+                                                    //
+                                                    // 几千字的思考链撑爆整屏的问题现在由自动折叠兜底：
+                                                    // 结束那一刻就折回去了，真要重看再手动展开。
+                                                    Text(
+                                                        message.reasoning,
+                                                        style = MaterialTheme.typography.bodySmall.copy(
+                                                            lineHeight = 18.sp
+                                                        ),
+                                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                                                        modifier = Modifier.padding(bottom = 8.dp)
+                                                    )
+                                                }
+                                            }
+                                            if (message.text.isNotEmpty()) {
+                                                // markdown 表格 / LaTeX / 粗体这些以前全是原始文本。
+                                                // 这里是唯一一处把模型回复渲染成富文本的地方，
+                                                // 思考链保持纯文本 —— 它是过程日志，不需要排版。
+                                                ChatRichText(
+                                                    text = message.text,
+                                                    onLinkClick = { url ->
+                                                        runCatching {
+                                                            val intent = android.content.Intent(
+                                                                android.content.Intent.ACTION_VIEW,
+                                                                android.net.Uri.parse(url)
+                                                            ).addFlags(
+                                                                android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                                            )
+                                                            context.startActivity(intent)
+                                                        }
+                                                    }
+                                                )
+                                            } else if (message.streaming && message.reasoning.isBlank()) {
+                                                Text(
+                                                    "…",
+                                                    style = MaterialTheme.typography.bodyMedium,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+
+                                            // 中断标记。定期存档会把流到一半的内容落盘，
+                                            // 所以从历史读回来的最后一条可能是半句 ——
+                                            // 不说清楚的话用户会以为模型就只答了这么多。
+                                            if (message.interrupted) {
+                                                Text(
+                                                    "生成被中断，以上是已经收到的部分",
+                                                    style = MaterialTheme.typography.labelMedium,
+                                                    color = MaterialTheme.colorScheme.error,
+                                                    modifier = Modifier.padding(bottom = 6.dp)
+                                                )
+                                            }
+
+                                            // 这里原来有整条复制的按钮行。用户原话：「是长按复制，
+                                            // 不是这样在气泡里影响我看」—— 每条回复下面挂一行按钮，
+                                            // 聊天记录被切得七零八落，点它就在动正文。
+                                            //
+                                            // 整条复制现在走系统：长按正文 → 系统选择工具栏
+                                            // （复制 / 全选 / 分享）。长按本来就要留给选词，
+                                            // 两者不冲突，而且屏幕上没有任何不属于对话内容的元素。
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!atBottom) {
+                    Surface(
+                        onClick = {
+                            scope.launch { listState.scrollToItem(0) }
+                        },
+                        shape = CircleShape,
+                        shadowElevation = 6.dp,
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .padding(bottom = 8.dp)
+                    ) {
+                        Text(
+                            "↓ 回到最新",
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+                }
+            }
+
+            // 对话历史面板：从右侧滑出
+            if (historyOpen) {
+                Box(
+                    modifier = Modifier
+                        .matchParentSize()
+                        .background(Color.Black.copy(alpha = 0.35f))
+                        .clickable { historyOpen = false }
+                )
+            }
+            androidx.compose.animation.AnimatedVisibility(
+                visible = historyOpen,
+                enter = slideInHorizontally(initialOffsetX = { it }),
+                exit = slideOutHorizontally(targetOffsetX = { it }),
+                modifier = Modifier.align(Alignment.CenterEnd)
+            ) {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .fillMaxWidth(0.78f),
+                    color = MaterialTheme.colorScheme.surface,
+                    tonalElevation = 3.dp
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "对话历史",
+                                modifier = Modifier.weight(1f),
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold
+                            )
+                            // "✕" 对读屏软件只是个字符，必须给它一个可读的标签
+                            TextButton(
+                                onClick = { historyOpen = false },
+                                modifier = Modifier
+                                    .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                    .semantics {
+                                        contentDescription = "关闭对话历史"
+                                        role = Role.Button
+                                    }
+                            ) { Text("✕") }
+                        }
+                        PaperButton(
+                            text = "＋ 添加新对话",
+                            onClick = {
+                                viewModel.newConversation()
+                                historyOpen = false
+                            },
+                            accent = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !busy
+                        )
+                        // 清空当前对话：破坏性、不可撤销，所以从顶栏挪到这里，
+                        // 而且要点两下（先按按钮，再在弹窗里确认）
+                        PaperButton(
+                            text = "清空当前对话",
+                            onClick = { confirmClear = true },
+                            accent = false,
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !busy && messages.isNotEmpty()
+                        )
+                        LazyColumn(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            if (conversations.isEmpty()) {
+                                item {
+                                    Text(
+                                        "还没有历史对话",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                            items(conversations, key = { it.id }) { convo ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(PaperShape)
+                                        .background(
+                                            if (convo.id == activeId) {
+                                                MaterialTheme.colorScheme.surfaceVariant
+                                            } else {
+                                                Color.Transparent
+                                            }
+                                        )
+                                        .clickable {
+                                            viewModel.openConversation(convo.id)
+                                            historyOpen = false
+                                        }
+                                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            convo.title,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            "${chatTimeFormat.format(Date(convo.updatedAt))} · ${convo.messages.size} 条",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    // 删除是不可撤销的：先落到 deleteTarget，等用户点确认
+                                    Text(
+                                        "✕",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier
+                                            .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                                            .wrapContentSize(Alignment.Center)
+                                            .clip(CircleShape)
+                                            .clickable { deleteTarget = convo }
+                                            .semantics {
+                                                contentDescription = "删除对话「${convo.title}」"
+                                                role = Role.Button
+                                            }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        error?.let {
+            Text(
+                "提示：$it",
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+        attachmentNotice?.let {
+            // 原来是一行 onSurfaceVariant + bodySmall 的淡灰小字，紧挨着消息列表。
+            // 附件加不上时它就是**唯一**的说明，而那个样式淡到几乎看不见 ——
+            // 于是「没提示」和「有提示」在屏幕上看起来一模一样。
+            // 现在给它 error 色和一个 ✕，和上面那条 error 一样重。
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(PaperShape)
+                    .background(MaterialTheme.colorScheme.errorContainer)
+                    .padding(horizontal = 10.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    it,
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.weight(1f)
+                )
+                Text(
+                    "✕",
+                    color = MaterialTheme.colorScheme.onErrorContainer,
+                    style = MaterialTheme.typography.labelMedium,
+                    modifier = Modifier
+                        .defaultMinSize(minWidth = 48.dp, minHeight = 48.dp)
+                        .wrapContentSize(Alignment.Center)
+                        .clip(CircleShape)
+                        .clickable { viewModel.clearAttachmentNotice() }
+                        .semantics {
+                            contentDescription = "关闭附件提示"
+                            role = Role.Button
+                        }
+                )
+            }
+        }
+
+        // 待发送的附件：可删、可点开看大图
+        if (pendingAttachments.isNotEmpty()) {
+            AttachmentStrip(
+                attachments = pendingAttachments,
+                tint = MaterialTheme.colorScheme.onSurface,
+                onRemove = viewModel::removePendingAttachment
+            )
+        }
+
+        // 输入行：加附件按钮 + 纸质输入框 + 圆形发送键
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.Bottom
+        ) {
+            // 相册 / 文件。用 PhotoPicker 而不是 ACTION_GET_CONTENT：
+            // 前者不需要任何存储权限，也不给用户一份「读取你所有文件」的能力。
+            val photoLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.PickVisualMedia()
+            ) { uri ->
+                if (uri != null) {
+                    viewModel.addImageAttachment(uri, queryDisplayName(context, uri))
+                } else {
+                    // 用户在选择器里按了返回 —— 不算错误，不提示。
+                    // 但**回调没被调用**（= 选择器压根没弹出来）是另一回事，
+                    // 那时候连这里都进不来，所以下面 launch 处也要有兜底。
+                    viewModel.clearAttachmentNotice()
+                }
+            }
+            val fileLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.OpenDocument()
+            ) { uri ->
+                if (uri != null) {
+                    viewModel.addDocumentAttachment(uri, queryDisplayName(context, uri))
+                } else {
+                    viewModel.clearAttachmentNotice()
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .clickable(enabled = !busy) {
+                        pickerMenuOpen = true
+                    }
+                    .semantics {
+                        contentDescription = "添加图片或文件"
+                        role = Role.Button
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text("＋", style = MaterialTheme.typography.titleMedium)
+            }
+            if (pickerMenuOpen) {
+                AlertDialog(
+                    onDismissRequest = { pickerMenuOpen = false },
+                    title = { Text("添加附件") },
+                    text = {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            TextButton(
+                                onClick = {
+                                    pickerMenuOpen = false
+                                    // launch() 自己抛异常的情况要兜住。系统选择器不可用
+                                    // （设备没有照片选择器、或 PhotoPicker 权限标记缺失）
+                                    // 时这里可能直接抛，而 ActivityResultLauncher.launch
+                                    // 内部吞掉一部分失败 —— 结果就是「点了没反应」。
+                                    // 不接住的话用户永远看不到原因。
+                                    runCatching {
+                                        photoLauncher.launch(
+                                            androidx.activity.result.PickVisualMediaRequest(
+                                                ActivityResultContracts.PickVisualMedia.ImageOnly
+                                            )
+                                        )
+                                    }.onFailure {
+                                        viewModel.setAttachmentNotice(
+                                            "无法打开图片选择器：${it.message ?: "系统未提供该功能"}"
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("图片（会压缩后发送）") }
+                            TextButton(
+                                onClick = {
+                                    pickerMenuOpen = false
+                                    runCatching {
+                                        fileLauncher.launch(
+                                            arrayOf(
+                                                "text/plain",
+                                                "text/markdown",
+                                                "text/csv",
+                                                "application/json",
+                                                "application/xml"
+                                            )
+                                        )
+                                    }.onFailure {
+                                        viewModel.setAttachmentNotice(
+                                            "无法打开文件选择器：${it.message ?: "系统未提供该功能"}"
+                                        )
+                                    }
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) { Text("文本文件（txt / md / csv / json）") }
+                            Text(
+                                "图片和文本会一起发给模型。模型不支持图片时会直接报错。",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    },
+                    confirmButton = {
+                        TextButton(onClick = { pickerMenuOpen = false }) { Text("取消") }
+                    }
+                )
+            }
+            PaperSurface(modifier = Modifier.weight(1f)) {
+                OutlinedTextField(
+                    value = input,
+                    onValueChange = { input = it },
+                    placeholder = {
+                        Text(
+                            if (busy) "生成中，可以先想好下一句…" else "写下你的想法…",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 15.sp)
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 1,
+                    maxLines = 4,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor = Color.Transparent,
+                        unfocusedBorderColor = Color.Transparent,
+                        focusedContainerColor = Color.Transparent,
+                        unfocusedContainerColor = Color.Transparent
+                    )
+                )
+            }
+            // 二选一：生成中=停止键，空闲=发送键
+            // 光图没字也算一次有效提问，所以附件在时不能把发送键置灰
+            val canSend = !busy && (input.isNotBlank() || pendingAttachments.isNotEmpty())
+            Box(
+                modifier = Modifier
+                    .size(52.dp)
+                    .clip(CircleShape)
+                    .background(
+                        if (busy) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.primary
+                    )
+                    .clickable(enabled = if (busy) true else canSend) {
+                        if (busy) {
+                            viewModel.stop()
+                        } else {
+                            val text = input
+                            input = ""
+                            // 先解冻，再让界面滚到底 —— 顺序重要。
+                            // 冻着的时候流式增量只进缓冲不落列表，而 scrollToItem
+                            // 打进一个「列表还没接受新项」的状态会被丢掉：
+                            // 结果就是「我发了话，它不往下跟」。
+                            // 「我发了话当然要从我这句话看起」没有例外。
+                            viewModel.onUserSent()
+                            viewModel.send(text)
+                            sendSeq++
+                        }
+                    }
+                    // "■/➤" 本身读不出来：这个键到底是"发出去"还是"停下来"必须念出来
+                    .semantics {
+                        contentDescription = if (busy) "停止生成" else "发送"
+                        role = Role.Button
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    if (busy) "■" else "➤",
+                    color = MaterialTheme.colorScheme.onError.copy(
+                        alpha = if (busy || canSend) 1f else 0.45f
+                    ),
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontSize = if (busy) 16.sp else 18.sp
+                    )
+                )
+            }
+        }
+
+        // 破坏性操作二次确认：清空会连历史记录一起删光，且不可撤销
+        if (confirmClear) {
+            AlertDialog(
+                onDismissRequest = { confirmClear = false },
+                title = { Text("清空当前对话？") },
+                text = { Text("这条对话的全部消息和它的历史记录都会被删除，且无法恢复。") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        confirmClear = false
+                        viewModel.clear()
+                    }) { Text("清空", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { confirmClear = false }) { Text("取消") }
+                }
+            )
+        }
+
+        deleteTarget?.let { target ->
+            AlertDialog(
+                onDismissRequest = { deleteTarget = null },
+                title = { Text("删除这条对话？") },
+                text = { Text("「${target.title}」的消息和历史记录都会被删除，且无法恢复。") },
+                confirmButton = {
+                    TextButton(onClick = {
+                        deleteTarget = null
+                        viewModel.deleteConversation(target.id)
+                    }) { Text("删除", color = MaterialTheme.colorScheme.error) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { deleteTarget = null }) { Text("取消") }
+                }
+            )
+        }
+    }
+}

@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.novelforge.app.domain.usecase.OutlineBatchPlanner
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.map
@@ -20,6 +21,11 @@ data class AppSettings(
     val outputBudget: Int = 5_000,
     val costConfirmationEnabled: Boolean = true,
     val disableThinking: Boolean = true,
+    /**
+     * 全自动轮次的批大小：一次生成多少章大纲 → 写完这几章正文 → 再出下一批。
+     * 设置 → 写作节奏 里可调；区间与夹取统一走 [OutlineBatchPlanner]。
+     */
+    val outlineBatchSize: Int = OutlineBatchPlanner.DEFAULT_BATCH_SIZE,
     /** 主题模式：system / light / dark */
     val themeMode: String = "system",
     /** 空字符串表示不使用自定义壁纸 */
@@ -42,6 +48,7 @@ class AppSettingsStore(private val context: Context) {
             preferences[OUTPUT_BUDGET] = next.outputBudget
             preferences[COST_CONFIRMATION] = next.costConfirmationEnabled
             preferences[DISABLE_THINKING] = next.disableThinking
+            preferences[OUTLINE_BATCH_SIZE] = next.outlineBatchSize
             preferences[THEME_MODE] = next.themeMode
             preferences[WALLPAPER_FILE] = next.wallpaperFileName
             preferences[WALLPAPER_DIM] = next.wallpaperDim
@@ -57,6 +64,10 @@ class AppSettingsStore(private val context: Context) {
         outputBudget = preferences[OUTPUT_BUDGET] ?: 5_000,
         costConfirmationEnabled = preferences[COST_CONFIRMATION] ?: true,
         disableThinking = preferences[DISABLE_THINKING] ?: true,
+        // 历史值可能超出后来调整的区间，读出时夹一遍，使用方就不用各自防御
+        outlineBatchSize = OutlineBatchPlanner.clampBatchSize(
+            preferences[OUTLINE_BATCH_SIZE] ?: OutlineBatchPlanner.DEFAULT_BATCH_SIZE
+        ),
         themeMode = preferences[THEME_MODE] ?: "system",
         wallpaperFileName = preferences[WALLPAPER_FILE].orEmpty(),
         // 区间跟着 Theme.wallpaperDimRange 对齐：亮色下限 0.75、暗色 0.60，
@@ -71,6 +82,7 @@ class AppSettingsStore(private val context: Context) {
         val OUTPUT_BUDGET = intPreferencesKey("output_budget")
         val COST_CONFIRMATION = booleanPreferencesKey("cost_confirmation")
         val DISABLE_THINKING = booleanPreferencesKey("disable_thinking")
+        val OUTLINE_BATCH_SIZE = intPreferencesKey("outline_batch_size")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val WALLPAPER_FILE = stringPreferencesKey("wallpaper_file")
         val WALLPAPER_DIM = intPreferencesKey("wallpaper_dim")

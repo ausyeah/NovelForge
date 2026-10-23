@@ -146,6 +146,8 @@ class GenerationRuntime(
         val job: GenerationJob,
         val request: ChatRequest?,
         val outlineProgress: OutlineProgress?,
+        /** 本批接受的章数上限（设置 → 写作节奏），落库护栏与请求侧共用同一个值 */
+        val batchSize: Int,
         /** 准备阶段就发现任务行已被删除：本次生成作废，禁止继续调用模型或落任何内容 */
         val superseded: Boolean = false
     )
@@ -208,6 +210,24 @@ class GenerationRuntime(
     }
 
     /**
+     * 只打开自动流转开关、不立刻驱动。用于「大纲正要（重）生成」的场景：
+     * 立刻 driveAutoNext 会读到还没被新版本替换的旧大纲——
+     * 重新生成时会拿旧目录的 chapter-N 先去写正文，等新大纲落库就串书。
+     * 开关打开后，大纲任务跑完落库会自然触发 driveAutoNext 接上正文。
+     */
+    suspend fun enableAutoRun(projectId: String) {
+        setAutoRun(projectId, true)
+    }
+
+    /**
+     * 大纲以任务管线之外的方式就绪（手动修复模型输出并保存）后调用：
+     * autoRun 开着就接着写正文，否则停在本批，交还给用户手动推进。
+     */
+    suspend fun resumeAfterManualFix(projectId: String) {
+        driveAutoNext(projectId)
+    }
+
+    /**
      * 全自动流转的调度中枢。在每一章正文/每一批大纲成功落库后调用：
      * - 本轮还有未写正文的章节 → 续写下一章
      * - 本轮 10 章全部写完且全书未完 → 生下一批大纲（R+1）
@@ -253,8 +273,11 @@ class GenerationRuntime(
                 enqueue(reset, replaceCompleted = true)
             } else {
                 // QUEUED/RUNNING/PAUSED/RECOVERABLE_PARTIAL/FAILED：工作链可能已丢失
-                // （历史 KEEP 拒绝入队），重新入队复活即可
-                enqueue(active, replaceCompleted = true)
+                // （历史 KEEP 拒绝入队），重新入队复活即可。
+                // RUNNING 例外：它的 WorkManager 链一定活着，KEEP 是无害空操作，
+                // REPLACE 反而会把飞行中的 LLM 调用拦腰砍掉重来——大纲批次落库的
+                // 自动驱动与正在写的章节并发时，这里恰好会被踩中。
+                enqueue(active, replaceCompleted = active.status != GenerationJobStatus.RUNNING)
             }
             return
         }
@@ -294,8 +317,10 @@ class GenerationRuntime(
                 projectId, GenerationPurpose.CHAPTER.name, nextChapter.id
             )
             if (active != null) {
-                // 复活可能丢失工作链的僵尸章节任务
-                enqueue(active, replaceCompleted = true)
+                // 复活可能丢失工作链的僵尸章节任务。RUNNING 不 REPLACE：
+                // WorkManager 链还活着，砍掉重跑等于把一次完整的正文调用作废
+                // （大纲批次落库触发驱动时，正在写的下一章恰好会被踩中）
+                enqueue(active, replaceCompleted = active.status != GenerationJobStatus.RUNNING)
                 return
             }
             val previous = chapters
@@ -362,7 +387,8 @@ class GenerationRuntime(
             projectId = projectId,
             connection = connection(settings),
             outputTokenBudget = settings.outputBudget,
-            clientRequestId = clientRequestId
+            clientRequestId = clientRequestId,
+            batchSize = settings.outlineBatchSize
         )
         var enqueuedJob = resetOutlineJobForRetry(queued.job, now())
         // 继续生成：以最新大纲版本为准重置任务内容。复用的旧任务里可能残留
@@ -378,7 +404,13 @@ class GenerationRuntime(
         // 快照必须在「续跑进度回填之后」重建：GenerateOutlineUseCase.invoke() 不掌握
         // 进度，它造的 request 恒为「从第 1 章开始」，直接存会让账本里的提示词与
         // 真正发出的请求不一致（追溯时永远看到第一批）。
-        savePromptSnapshot(outlineRequestSnapshot(QueuedGeneration(enqueuedJob, queued.request), settings))
+        savePromptSnapshot(
+            outlineRequestSnapshot(
+                QueuedGeneration(enqueuedJob, queued.request),
+                settings,
+                settings.outlineBatchSize
+            )
+        )
         // 必须把重置后的状态写回数据库；否则 Worker 读到的仍是 NEEDS_USER，
         // execute() 会直接跳过执行，用户点击“修复并重试”就毫无反应。
         generationRepository.updateJob(enqueuedJob)
@@ -402,7 +434,8 @@ class GenerationRuntime(
      */
     private suspend fun outlineRequestSnapshot(
         queued: QueuedGeneration,
-        settings: AppSettings
+        settings: AppSettings,
+        batchSize: Int
     ): QueuedGeneration {
         val project = projectRepository.getProject(queued.job.projectId) ?: return queued
         val creativeConfig = project.creativeConfig ?: return queued
@@ -416,7 +449,8 @@ class GenerationRuntime(
                 outputTokenBudget = settings.outputBudget,
                 requestId = requestId,
                 chapterNumber = progress.currentChapterNumber,
-                previousChapters = progress.chapters.takeLast(PREVIOUS_CONTEXT_LIMIT)
+                previousChapters = progress.chapters.takeLast(PREVIOUS_CONTEXT_LIMIT),
+                batchSize = batchSize
             )
         )
     }
@@ -766,7 +800,8 @@ class GenerationRuntime(
                 PreparedExecution(
                     job = job,
                     request = restoreRequest(job, snapshot, settings),
-                    outlineProgress = null
+                    outlineProgress = null,
+                    batchSize = OutlineBatchPlanner.clampBatchSize(settings.outlineBatchSize)
                 )
             }
             if (prepared.superseded) {
@@ -911,8 +946,9 @@ class GenerationRuntime(
         val creativeConfig = checkNotNull(project.creativeConfig) { "请先完成创作设置" }
         val totalChapterCount = creativeConfig.chapterCount.coerceIn(MIN_CHAPTER_COUNT, MAX_CHAPTER_COUNT)
         val progress = readOutlineProgress(job.partialContent, totalChapterCount)
+        val batchSize = OutlineBatchPlanner.clampBatchSize(settings.outlineBatchSize)
         if (progress.nextOrderIndex >= totalChapterCount) {
-            return PreparedExecution(job, request = null, outlineProgress = progress)
+            return PreparedExecution(job, request = null, outlineProgress = progress, batchSize = batchSize)
         }
 
         val requestId = "${job.clientRequestId}-outline-chapter-${progress.currentChapterNumber}"
@@ -922,7 +958,8 @@ class GenerationRuntime(
             outputTokenBudget = settings.outputBudget,
             requestId = requestId,
             chapterNumber = progress.currentChapterNumber,
-            previousChapters = progress.chapters.takeLast(PREVIOUS_CONTEXT_LIMIT)
+            previousChapters = progress.chapters.takeLast(PREVIOUS_CONTEXT_LIMIT),
+            batchSize = batchSize
         ).let { baseRequest ->
             baseRequest.copy(
                 options = baseRequest.options.copy(
@@ -945,9 +982,9 @@ class GenerationRuntime(
         // 条件更新：用 upsert(REPLACE) 会把「全新重生成大纲」刚清掉的行重新插回来，
         // worker 随后照常跑完并把旧大纲挂回新目录。写不进去就地作废。
         if (!generationRepository.updateJobIfExists(updatedJob)) {
-            return PreparedExecution(job, request = request, outlineProgress = progress, superseded = true)
+            return PreparedExecution(job, request = request, outlineProgress = progress, batchSize = batchSize, superseded = true)
         }
-        return PreparedExecution(updatedJob, request, progress)
+        return PreparedExecution(updatedJob, request, progress, batchSize)
     }
 
     private fun readOutlineProgress(raw: String, totalChapterCount: Int): OutlineProgress {
@@ -1100,14 +1137,14 @@ class GenerationRuntime(
                 // 删章留洞也不会让新 id 与既有 "chapter-N" 撞号
                 val start = progress.currentChapterNumber
                 val remaining = (progress.totalChapterCount - progress.nextOrderIndex).coerceAtLeast(0)
-                // 批大小护栏：模型一次吐回整本书时，仍然只收本批（默认 10 章），
-                // 多出来的章节留给后续批次——先把这批正文写完再继续下一批。
+                // 批大小护栏：模型一次吐回整本书时，仍然只收本批（设置 → 写作节奏，
+                // 默认 10 章），多出来的章节留给后续批次——先把这批正文写完再继续下一批。
                 // 去掉这道护栏，超长篇就会退化成「一次性把全书大纲写完」，
                 // 后面的章节既没有正文锚点、也没有上下文空间，质量会直线塌陷。
                 val accepted = OutlineBatchPlanner.acceptedCount(
                     returned = parsed.value.size,
                     remainingInBook = remaining,
-                    batchSize = GenerateOutlineUseCase.OUTLINE_BATCH_SIZE
+                    batchSize = prepared.batchSize
                 )
                 diag("finishOutline: returned=${parsed.value.size} accepted=$accepted nextOrderIndex=${progress.nextOrderIndex} total=${progress.totalChapterCount} start=$start")
                 val newItems = parsed.value.take(accepted).mapIndexed { index, item ->

@@ -112,14 +112,34 @@ class OutlineViewModel(
         }
     }
 
+    /**
+     * 「生成大纲 / 继续生成大纲 / 重新生成大纲」共用入口。
+     *
+     * 出完大纲接着写正文（自动打开流转开关）：大纲任务落库后 driveAutoNext
+     * 会自动接上本批正文——「写 N 章大纲 → 写 N 章正文」的闭环从这里开始，
+     * 不再要求用户生成完大纲后自己去找「一键全自动」。
+     *
+     * 立刻驱动的时机分两种：
+     * - continue=true（继续生成/重试）：当前大纲仍然有效，直接驱动——
+     *   有没写正文的章先写，全写完了会续出下一批。
+     * - 全新生成/重新生成：不能立刻驱动。此刻库里还是旧大纲（重新生成时
+     *   chapter-N 的 id 会被新批次复用，先写正文会串书）；等新大纲落库后
+     *   由任务完成路径触发驱动，顺序天然正确。
+     */
     fun generate(continueFromExisting: Boolean = false) {
         _error.value = null
         viewModelScope.launch {
             runCatching {
-                generationRuntime.queueOutline(
+                val job = generationRuntime.queueOutline(
                     projectId,
                     continueFromExisting = continueFromExisting
                 )
+                if (continueFromExisting) {
+                    generationRuntime.startAutoRun(projectId)
+                } else {
+                    generationRuntime.enableAutoRun(projectId)
+                }
+                job
             }
                 .onSuccess { activeJobId.value = it.id }
                 .onFailure { _error.value = it.message ?: "无法创建大纲生成任务" }
@@ -556,6 +576,13 @@ class OutlineViewModel(
                     }
                     // 手动修复落库 = 新版本，缓冲区跟着归位
                     draftOverride.value = null
+                    // 修复前流水线正停在这个任务上等人：大纲既然落库成功，
+                    // autoRun 开着就立刻续跑正文，别让用户再去找一次「开始写正文」。
+                    // 续跑的失败（比如没配 Key）不能算进「保存大纲失败」——保存已经成功了
+                    runCatching { generationRuntime.resumeAfterManualFix(projectId) }
+                        .onFailure {
+                            _error.value = "大纲已保存，但续跑正文失败：${it.message ?: "未知原因"}"
+                        }
                 }.onFailure { _error.value = it.message ?: "保存大纲失败" }
             }
         }

@@ -39,7 +39,8 @@ class GenerateOutlineUseCase(
         projectId: String,
         connection: LLMConnectionConfig,
         outputTokenBudget: Int,
-        clientRequestId: String = UUID.randomUUID().toString()
+        clientRequestId: String = UUID.randomUUID().toString(),
+        batchSize: Int = OUTLINE_BATCH_SIZE
     ): QueuedGeneration {
         val project = requireNotNull(projectRepository.getProject(projectId)) { "项目不存在" }
         checkNotNull(project.creativeConfig) { "请先完成创作设置" }
@@ -53,7 +54,8 @@ class GenerateOutlineUseCase(
                     outputTokenBudget = outputTokenBudget,
                     requestId = clientRequestId,
                     chapterNumber = 1,
-                    previousChapters = emptyList()
+                    previousChapters = emptyList(),
+                    batchSize = batchSize
                 )
             )
         }
@@ -71,7 +73,8 @@ class GenerateOutlineUseCase(
                     outputTokenBudget = outputTokenBudget,
                     requestId = clientRequestId,
                     chapterNumber = 1,
-                    previousChapters = emptyList()
+                    previousChapters = emptyList(),
+                    batchSize = batchSize
                 )
             )
         }
@@ -89,7 +92,8 @@ class GenerateOutlineUseCase(
                     outputTokenBudget = outputTokenBudget,
                     requestId = clientRequestId,
                     chapterNumber = 1,
-                    previousChapters = emptyList()
+                    previousChapters = emptyList(),
+                    batchSize = batchSize
                 )
             )
         }
@@ -123,15 +127,18 @@ class GenerateOutlineUseCase(
         outputTokenBudget: Int,
         requestId: String,
         chapterNumber: Int,
-        previousChapters: List<OutlineItem>
+        previousChapters: List<OutlineItem>,
+        batchSize: Int = OUTLINE_BATCH_SIZE
     ): ChatRequest {
         val creativeConfig = checkNotNull(project.creativeConfig) { "请先完成创作设置" }
         val chapterCount = creativeConfig.chapterCount.coerceIn(MIN_CHAPTER_COUNT, MAX_CHAPTER_COUNT)
-        // 分批生成：每次请求一批连续推进段，避免要求模型一次输出几百章
+        // 分批生成：每次请求一批连续推进段，避免要求模型一次输出几百章。
+        // 批大小来自设置（设置 → 写作节奏），夹取统一在 OutlineBatchPlanner
+        val safeBatchSize = OutlineBatchPlanner.clampBatchSize(batchSize)
         val batchWindow = OutlineBatchPlanner.window(
             chapterNumber = chapterNumber,
             chapterCount = chapterCount,
-            batchSize = OUTLINE_BATCH_SIZE
+            batchSize = safeBatchSize
         )
         val batchStart = batchWindow.first
         val batchEnd = batchWindow.last

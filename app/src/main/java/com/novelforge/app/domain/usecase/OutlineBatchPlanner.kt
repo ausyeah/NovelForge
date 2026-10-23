@@ -19,6 +19,21 @@ object OutlineBatchPlanner {
     const val BATCH_SIZE = 10
 
     /**
+     * 批大小的合法区间与用户设置的夹取。
+     *
+     * 「每批几章大纲」现在是设置项（设置 → 写作节奏），但上限不能放开到
+     * 全书章数：一批 50 章概要在默认 5000 token 的输出预算下几乎必被截断
+     * （截断的 JSON 整单作废），所以给个 30 的硬顶，用户要更长就多跑几批。
+     */
+    const val MIN_BATCH_SIZE = 1
+    const val MAX_BATCH_SIZE = 30
+
+    /** 默认批大小：与 [BATCH_SIZE] 同值，供设置存储等不依赖本对象常量的地方引用 */
+    const val DEFAULT_BATCH_SIZE = BATCH_SIZE
+
+    fun clampBatchSize(value: Int): Int = value.coerceIn(MIN_BATCH_SIZE, MAX_BATCH_SIZE)
+
+    /**
      * 本次请求覆盖的章节区间（闭区间，章号从 1 开始）。
      *
      * @param chapterNumber 本次起始章号（= 已生成到的下一章）

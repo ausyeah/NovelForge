@@ -62,6 +62,7 @@ import com.novelforge.app.data.settings.AppSettingsStore
 import com.novelforge.app.data.settings.ModelPreset
 import com.novelforge.app.data.settings.ModelPresetStore
 import com.novelforge.app.data.settings.upsertModelPreset
+import com.novelforge.app.domain.usecase.OutlineBatchPlanner
 import com.novelforge.app.ui.theme.PaperSurface
 import com.novelforge.app.infrastructure.jobs.ConnectionTestResult
 import kotlinx.coroutines.CancellationException
@@ -247,6 +248,32 @@ fun SettingsScreen(
                 valueRange = dimRange
             )
         }
+        Text("写作节奏", style = MaterialTheme.typography.titleSmall)
+        Text(
+            "全自动按轮次推进：先生成本批大纲，逐章写完这批正文，再自动续下一批。" +
+                "批越大，单次大纲请求输出越长，越容易触到模型输出上限被截断。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            "每批大纲 ${settings.outlineBatchSize} 章，写完再续下一批",
+            style = MaterialTheme.typography.bodyMedium
+        )
+        // 与壁纸遮罩滑块同一套持久化习惯：拖动只改本地状态，松手即写盘，
+        // 不占用「保存设置」（那里管的是连接配置）
+        Slider(
+            value = settings.outlineBatchSize.toFloat(),
+            onValueChange = { settings = settings.copy(outlineBatchSize = it.roundToInt()) },
+            onValueChangeFinished = {
+                val size = settings.outlineBatchSize
+                scope.launch {
+                    settingsStore.update { current -> current.copy(outlineBatchSize = size) }
+                }
+            },
+            // steps 让滑块只停在整数档：1..30 之间共 28 个中间档
+            steps = OutlineBatchPlanner.MAX_BATCH_SIZE - OutlineBatchPlanner.MIN_BATCH_SIZE - 1,
+            valueRange = OutlineBatchPlanner.MIN_BATCH_SIZE.toFloat()..OutlineBatchPlanner.MAX_BATCH_SIZE.toFloat()
+        )
         Text("已保存的配置", style = MaterialTheme.typography.titleSmall)
         Text(
             if (presets.isEmpty()) "保存设置时会记住这一套连接配置。点按载入表单后修改，长按删除。"

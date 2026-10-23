@@ -92,4 +92,29 @@ class OutlineBatchPlannerTest {
     fun useCaseBatchSizeSharesPlannerConstant() {
         assertEquals(OutlineBatchPlanner.BATCH_SIZE, GenerateOutlineUseCase.OUTLINE_BATCH_SIZE)
     }
+
+    @Test
+    fun clampBatchSize_keepsConfiguredRange() {
+        assertEquals(OutlineBatchPlanner.MIN_BATCH_SIZE, OutlineBatchPlanner.clampBatchSize(-5))
+        assertEquals(OutlineBatchPlanner.MIN_BATCH_SIZE, OutlineBatchPlanner.clampBatchSize(0))
+        assertEquals(10, OutlineBatchPlanner.clampBatchSize(10))
+        assertEquals(
+            OutlineBatchPlanner.MAX_BATCH_SIZE,
+            OutlineBatchPlanner.clampBatchSize(OutlineBatchPlanner.MAX_BATCH_SIZE + 1)
+        )
+    }
+
+    @Test
+    fun configuredBatchSizeDrivesAllThreeRules() {
+        // 设置改成 15 章一批：请求窗口、接受护栏、暂停判定必须用同一个批大小，
+        // 否则会出现「请求 15 章、只落 10 章」这种各说各话的裂缝
+        val size = 15
+        assertEquals(1..15, OutlineBatchPlanner.window(chapterNumber = 1, chapterCount = 100, batchSize = size))
+        assertEquals(16..30, OutlineBatchPlanner.window(chapterNumber = 16, chapterCount = 100, batchSize = size))
+        assertEquals(15, OutlineBatchPlanner.acceptedCount(returned = 100, remainingInBook = 100, batchSize = size))
+        assertTrue(OutlineBatchPlanner.shouldPause(nextOrderIndex = 0, accepted = 15, totalChapterCount = 100))
+        // 一批 1 章：逐章滚动（「每出 1 章大纲就写 1 章正文」）
+        assertEquals(1..1, OutlineBatchPlanner.window(chapterNumber = 1, chapterCount = 100, batchSize = 1))
+        assertEquals(1, OutlineBatchPlanner.acceptedCount(returned = 10, remainingInBook = 10, batchSize = 1))
+    }
 }

@@ -194,6 +194,40 @@ class GenerationUseCaseTest {
         assertTrue(!prompt.contains("至少生成"))
     }
 
+    @Test
+    fun buildChapterRequest_honorsConfiguredBatchSize() {
+        // 设置 → 写作节奏 改成每批 5 章：提示词里的批次区间必须跟着变，
+        // 这是「写多少大纲再写正文」可配置的落点
+        val projectRepository = RecordingProjectRepository()
+        val generationRepository = RecordingGenerationRepository()
+        val project = Project(
+            id = "project-batch-size",
+            title = "批大小可调",
+            questData = QuestData(answers = mapOf("premise" to "设定")),
+            creativeConfig = CreativeConfig(chapterCount = 80),
+            flowState = FlowState.OUTLINE_GENERATE,
+            status = ProjectStatus.OUTLINING,
+            createdAt = 1L,
+            updatedAt = 1L
+        )
+        projectRepository.saved = project
+        val useCase = GenerateOutlineUseCase(projectRepository, generationRepository)
+
+        val prompt = useCase.buildChapterRequest(
+            project = project,
+            connection = testConnection(),
+            outputTokenBudget = 512,
+            requestId = "batch-size-request",
+            chapterNumber = 41,
+            previousChapters = emptyList(),
+            batchSize = 5
+        ).messages.last().content
+
+        assertTrue(prompt.contains("共 5 个连续推进段"))
+        assertTrue(prompt.contains("第 44 章"))
+        assertTrue(!prompt.contains("第 45 章"))
+    }
+
     private fun testConnection() = LLMConnectionConfig(
         baseUrl = "https://example.com/v1",
         apiKey = System.getenv("NF_TEST_FAKE_TOKEN") ?: error("缺少测试环境变量 NF_TEST_FAKE_TOKEN"),

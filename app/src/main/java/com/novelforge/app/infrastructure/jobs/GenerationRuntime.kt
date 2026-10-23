@@ -214,13 +214,20 @@ class GenerationRuntime(
      * - 全书完成 → 停止
      */
     private suspend fun driveAutoNext(projectId: String): Unit = autoNextLock(projectId).withLock {
-        if (!autoRunStore.observe(projectId).first()) return
+        val autoRunOn = autoRunStore.observe(projectId).first()
+        diag("driveAutoNext[$projectId] autoRun=$autoRunOn")
+        if (!autoRunOn) {
+            diag("driveAutoNext[$projectId] autoRun 关闭 -> 直接返回：不写正文也不续大纲（若一直在此返回，说明没点「一键全自动/开始写正文」）")
+            return
+        }
         val project = projectRepository.getProject(projectId) ?: return
         val total = project.creativeConfig?.chapterCount?.coerceIn(MIN_CHAPTER_COUNT, MAX_CHAPTER_COUNT) ?: return
         val outline = outlineRepository.latest(projectId)
         val chapters = outline?.chapters?.sortedBy { it.orderIndex }.orEmpty()
+        diag("driveAutoNext[$projectId] total=$total outlineVersion=${outline?.version} chapters=${chapters.size} ids=${chapters.take(30).map { it.id }}")
         if (chapters.isEmpty()) {
             // 全新项目：第一步永远是生成本批大纲
+            diag("driveAutoNext[$projectId] 当前无大纲(chapters 空) -> 走生成本批大纲分支")
             val active = generationRepository.findActiveJob(
                 projectId, GenerationPurpose.OUTLINE.name, null
             )
@@ -256,7 +263,9 @@ class GenerationRuntime(
         val nextChapter = chapters.firstOrNull { chapter ->
             chapter.id !in writtenIds
         }
+        diag("driveAutoNext[$projectId] writtenIds=$writtenIds -> nextChapter=${nextChapter?.id ?: "null(所有已生成章都被判定为已写)"}")
         if (nextChapter != null) {
+            diag("driveAutoNext[$projectId] -> queueChapter ${nextChapter.id}（开始写正文）")
             // 同一章失败自动重试的次数上限：3 次失败任务则显式停下等用户处理
             val attempts = generationRepository.countJobs(
                 projectId, GenerationPurpose.CHAPTER.name, nextChapter.id
@@ -316,8 +325,11 @@ class GenerationRuntime(
             )
         } else if ((chapters.maxOfOrNull { it.orderIndex } ?: -1) + 1 < total) {
             // 本轮正文全部写完 → 下一批大纲
+            diag("driveAutoNext[$projectId] 所有已生成章都写过正文 -> queueOutline 下一批大纲")
             // （PAUSED 的旧任务会被 queueOutline 复用并以 REPLACE 重新入队）
             queueOutline(projectId, continueFromExisting = true)
+        } else {
+            diag("driveAutoNext[$projectId] 全书正文已全部写完 -> 停止")
         }
     }
 
@@ -1097,6 +1109,7 @@ class GenerationRuntime(
                     remainingInBook = remaining,
                     batchSize = GenerateOutlineUseCase.OUTLINE_BATCH_SIZE
                 )
+                diag("finishOutline: returned=${parsed.value.size} accepted=$accepted nextOrderIndex=${progress.nextOrderIndex} total=${progress.totalChapterCount} start=$start")
                 val newItems = parsed.value.take(accepted).mapIndexed { index, item ->
                     item.copy(
                         id = "chapter-${start + index}",
@@ -1127,12 +1140,13 @@ class GenerationRuntime(
                     errorMessage = null,
                     updatedAt = now()
                 )
-                if (OutlineBatchPlanner.shouldPause(
-                        nextOrderIndex = progress.nextOrderIndex,
-                        accepted = newItems.size,
-                        totalChapterCount = progress.totalChapterCount
-                    )
-                ) {
+                val pause = OutlineBatchPlanner.shouldPause(
+                    nextOrderIndex = progress.nextOrderIndex,
+                    accepted = newItems.size,
+                    totalChapterCount = progress.totalChapterCount
+                )
+                diag("finishOutline: shouldPause=$pause -> ${if (pause) "PAUSED(本批大纲完，等正文)" else "COMPLETED(本书大纲凑齐)"}，随后都会 driveAutoNext")
+                if (pause) {
                     // 轮次机制：每批（10 章）完成后暂停，等本批正文写完再继续下一批；
                     // 先把当前累积大纲落为版本，供用户查看/编辑
                     val result = persistOutline(
@@ -1613,10 +1627,20 @@ class GenerationRuntime(
     private fun checkpointContent(prefix: String, current: String): String =
         if (prefix.isBlank()) current else prefix + current
 
+    /**
+     * 诊断日志：`adb logcat -s NF-Drive` 可看全自动流转的每一次真实决策
+     * （autoRun 开关、当前大纲章数、已写章节、判章结果、走哪条分支）。
+     * runCatching 包裹：单测环境 android.util.Log 未 mock 会抛异常，不能让它影响逻辑。
+     */
+    private fun diag(message: String) {
+        runCatching { android.util.Log.d(DIAG_TAG, message) }
+    }
+
     private fun uniqueWorkName(jobId: String) = "generation-$jobId"
 
     companion object {
         private const val TAG = "novelforge-generation"
+        private const val DIAG_TAG = "NF-Drive"
         private const val CONNECTION_TEST_TIMEOUT_MS = 25_000L
         private const val MAX_WORK_ATTEMPTS = 3
         private const val MAX_AUTO_ATTEMPTS_PER_CHAPTER = 3

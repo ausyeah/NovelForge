@@ -226,8 +226,27 @@ class GenerationRuntime(
             )
             if (active == null) {
                 queueOutline(projectId)
+            } else if (
+                active.status == GenerationJobStatus.COMPLETED ||
+                    active.status == GenerationJobStatus.NEEDS_USER ||
+                    active.status == GenerationJobStatus.CANCELLED
+            ) {
+                // findActive 的 SQL 并不过滤 status，取到的可能是上一轮遗留的终态任务。
+                // runGeneration 开头会直接跳过 COMPLETED/NEEDS_USER/CANCELLED，原样 enqueue
+                // 复活等于什么都不做——大纲不生成、正文更不会开始。重置成 QUEUED 再入队，
+                // 让它真正重新跑一遍。
+                val reset = active.copy(
+                    status = GenerationJobStatus.QUEUED,
+                    errorType = null,
+                    errorMessage = null,
+                    createdAt = now(),
+                    updatedAt = now()
+                )
+                generationRepository.updateJob(reset)
+                enqueue(reset, replaceCompleted = true)
             } else {
-                // 已有大纲任务但可能工作链已丢失（历史 KEEP 拒绝入队）→ 重新入队复活
+                // QUEUED/RUNNING/PAUSED/RECOVERABLE_PARTIAL/FAILED：工作链可能已丢失
+                // （历史 KEEP 拒绝入队），重新入队复活即可
                 enqueue(active, replaceCompleted = true)
             }
             return
@@ -1151,6 +1170,14 @@ class GenerationRuntime(
                             ),
                             call
                         )
+                    } else {
+                        // shouldPause=false = 本书大纲已全部生成完毕（模型一次吐回全书被
+                        // 护栏截到刚好凑齐，或分批推进到了最后一批）。这里以前直接 return，
+                        // 于是大纲一凑齐就再也不驱动正文——小书（≤10 章）和超长篇的最后一批
+                        // 都永久卡在「大纲齐了但正文一字未写」。
+                        // driveAutoNext 内部会自己判断 autoRun 开关和「是否还有未写正文的
+                        // 章节」：全书正文都写完时会安全停止，不会重复入队或死循环。
+                        driveAutoNext(savedJob.projectId)
                     }
                     GenerationExecutionResult.Success
                 }

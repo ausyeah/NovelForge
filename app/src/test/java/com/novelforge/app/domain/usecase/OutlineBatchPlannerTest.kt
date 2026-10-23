@@ -61,6 +61,18 @@ class OutlineBatchPlannerTest {
     }
 
     @Test
+    fun shouldPause_falseExactlyWhenOutlineCompletes_butBodyMustStillRun() {
+        // shouldPause=false 只表示「大纲批次数到此为止」，绝不表示「正文已完成」。
+        // finishOutlineExecution 在这个分支过去直接 return、不 driveAutoNext，导致：
+        // 小书（≤10 章）、超长篇的最后一批、以及模型一次吐全书被护栏截到刚好凑齐时，
+        // 大纲齐了就再也不写正文（beta66 修复的回归点）。这里把边界钉死。
+        assertFalse(OutlineBatchPlanner.shouldPause(nextOrderIndex = 0, accepted = 100, totalChapterCount = 100))
+        assertFalse(OutlineBatchPlanner.shouldPause(nextOrderIndex = 90, accepted = 10, totalChapterCount = 100))
+        // 差一章没凑齐 → 仍要暂停等正文
+        assertTrue(OutlineBatchPlanner.shouldPause(nextOrderIndex = 90, accepted = 9, totalChapterCount = 100))
+    }
+
+    @Test
     fun overflowNeverSkipsThePause() {
         // 组装场景：全书 300 章，已生成 0 章，模型一次返回 300 章
         val total = 300

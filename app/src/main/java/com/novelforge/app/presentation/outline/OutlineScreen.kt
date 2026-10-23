@@ -168,6 +168,16 @@ fun OutlineScreen(
         !isRegen -> "继续生成大纲（${chapterLabel(nextFreeIndex)} 起）"
         else -> "重新生成大纲"
     }
+    // 「一键全自动」主按钮的文案跟着进度走：已有大纲且还有未写章节时，精准提示
+    // 「开始写正文」，而不是笼统的「一键全自动」。用户最常见的卡死就是点完
+    // 「生成大纲 / 继续生成大纲」（它只出大纲、不开 autoRun）之后，不知道要点哪个
+    // 按钮才会接着写正文——把下一步直接写在按钮上。
+    val firstUnwrittenIndex = draftItems.firstOrNull { it.id !in writtenChapterIds }?.orderIndex
+    val autoRunPrimaryLabel = if (firstUnwrittenIndex != null) {
+        "▶ 开始写正文（从${chapterLabel(firstUnwrittenIndex)}起，全自动）"
+    } else {
+        "▶ 一键全自动生成全书（大纲 + 正文）"
+    }
 
     // 唯一一处返回判定：系统手势和顶栏「返回」都走它，行为不许分叉。
     // 规则见 OutlineViewModel.requestBack：先关详情 → 有未保存的先问 → 才允许离开本页。
@@ -184,6 +194,7 @@ fun OutlineScreen(
         AutoRunControls(
             autoRun = autoRun,
             anyBusy = anyBusy,
+            primaryLabel = autoRunPrimaryLabel,
             onStartAutoRun = viewModel::startAutoRun,
             onToggleAutoRun = viewModel::setAutoRun
         )
@@ -586,6 +597,7 @@ fun OutlineScreen(
 private fun AutoRunControls(
     autoRun: Boolean,
     anyBusy: Boolean,
+    primaryLabel: String,
     onStartAutoRun: () -> Unit,
     onToggleAutoRun: (Boolean) -> Unit
 ) {
@@ -594,7 +606,7 @@ private fun AutoRunControls(
             onClick = onStartAutoRun,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text("▶ 一键全自动生成全书（大纲 + 正文）")
+            Text(primaryLabel)
         }
     }
     // 开关常驻：跑起来时上面的按钮会消失，这时候它就是用户唯一的刹车
@@ -705,6 +717,7 @@ private fun ChapterDetailPane(
         AutoRunControls(
             autoRun = autoRun,
             anyBusy = anyBusy,
+            primaryLabel = "▶ 一键全自动生成全书（大纲 + 正文）",
             onStartAutoRun = onStartAutoRun,
             onToggleAutoRun = onToggleAutoRun
         )
